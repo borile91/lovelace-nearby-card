@@ -41,7 +41,7 @@
 
   const CARD_TYPE = "nearby-card";
   const EDITOR_TAG = "nearby-card-editor";
-  const VERSION = "1.3.0";
+  const VERSION = "1.3.1";
 
   const UNKNOWN = ["unknown", "unavailable", "none", "not_home", ""];
 
@@ -159,9 +159,20 @@
                     background:var(--secondary-background-color, rgba(127,127,127,.14)); }
     .rooms button.on { background:var(--primary-color); color:var(--text-primary-color,#fff); }
 
-    .group { display:flex; flex-direction:column; }
-    /* same 8px Home Assistant leaves between cards in a section */
-    .stack { display:flex; flex-direction:column; gap:8px; }
+    /* Home Assistant's own measurements, read off the frontend rather than
+       guessed. A section is a grid with --ha-section-grid-row-gap (8px)
+       between cards, where every cell is at least
+       (--ha-section-grid-row-height - row-gap) / 2 = 24px tall. The heading
+       card fills its cell and pushes its text to the bottom of it, which is
+       where the air above a heading comes from — and, with the gap, the air
+       below. Reproduced here rather than approximated: same tokens, so a
+       theme that changes them changes this too. */
+    .body { display:flex; flex-direction:column; gap:var(--ha-section-grid-row-gap, 8px); }
+    .group { display:flex; flex-direction:column; gap:var(--ha-section-grid-row-gap, 8px); }
+    .stack { display:flex; flex-direction:column; gap:var(--ha-section-grid-row-gap, 8px); }
+    .heading { display:flex;
+               min-height:calc((var(--ha-section-grid-row-height, 56px)
+                                - var(--ha-section-grid-row-gap, 8px)) / 2); }
 
     .empty { font-size:13px; color:var(--secondary-text-color); padding:8px 4px; }
   `;
@@ -635,6 +646,7 @@
       const conf = { type: "heading", heading: g.title, heading_style: g.here ? "title" : "subtitle" };
       if (this._config.group_icons && g.icon) conf.icon = g.icon;
       const el = document.createElement("hui-card");
+      el.className = "heading";
       el.config = conf;
       el.hass = this._hass;
       el.preview = this._preview;
