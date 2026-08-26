@@ -167,21 +167,87 @@ Headings are Home Assistant's own **heading card**, not something drawn here to 
 
 ### Labels
 
-Every string can be replaced, which is also how you translate the card:
+Every string the card shows can be replaced, which is also how you translate it. Placeholders in braces are filled in.
+
+| Label | Default | Where it shows |
+| --- | --- | --- |
+| `here` | `Here` | Heading of the current room, when the area has no name |
+| `rest_of_floor` | `Rest of {floor}` | Heading of the rest of your floor |
+| `elsewhere` | `Elsewhere` | Heading of everything else |
+| `no_floor` | `Unassigned` | Heading for cards whose area has no floor |
+| `away` | `Away` | Position line, when nothing knows where you are |
+| `away_note` | `not reordering: listed by floor` | Second line, same case |
+| `at_home` | `At home` | Position line, in the house but no floor known |
+| `in_room` | `In {area}` | Position line, room known |
+| `on_floor` | `On {floor}` | Position line, only the floor known |
+| `room_unclear` | `Room unclear: nearest receiver is {distance} away, in {area}` | Second line, past `max_distance` |
+| `manual` | `set by hand · back to automatic in {minutes} min` | Second line, room picked by hand |
+| `automatic` | `Automatic` | First chip in the room picker, hands control back |
+| `pick_room` | `Say which room you are in` | Tooltip of the crosshair button |
+| `empty` | `No cards yet. Add some in the editor.` | When there are no cards |
+
+In Italian, for instance:
 
 ```yaml
 labels:
   here: Qui
   rest_of_floor: "Resto del {floor}"
   elsewhere: Altrove
+  no_floor: Altre
   away: Fuori casa
+  away_note: "nessun riordino: elenco per piano"
+  at_home: Sei in casa
   in_room: "Sei in {area}"
   on_floor: "Sei al {floor}"
   room_unclear: "Stanza incerta: il ricevitore più vicino è a {distance}, in {area}"
   manual: "detto a mano · torna automatico fra {minutes} min"
+  automatic: Automatico
+  pick_room: "Dì in che stanza sei"
+  empty: "Nessuna scheda. Aggiungine dall'editor."
 ```
 
-Placeholders in braces are filled in: `{area}`, `{floor}`, `{distance}`, `{minutes}`.
+### Everything at once
+
+The whole configuration in one place, for copying and cutting down:
+
+```yaml
+type: custom:nearby-card
+presence:
+  priority: [area_sensors, area_sensor]   # which source is asked first
+  manual_minutes: 20
+  area_sensor:
+    entity: sensor.phone_area
+    area_attribute: area_id               # leave empty if the area is in the state
+    floor_attribute: floor_id
+    distance_entity: sensor.phone_distance
+    max_distance: 3.5                     # omit to always trust the room
+  area_sensors:
+    - area: bathroom
+      entity: binary_sensor.bathroom_presence
+    - area: study
+      entity: binary_sensor.study_presence
+      state: "on"
+nearby:                                   # cards lent to a neighbouring room
+  - area: bathroom
+    entities: [cover.back_window]
+grouping: area_floor_rest                 # area_floor_rest | area_rest | floor | none
+sort: config                              # config | name
+group_icons: false
+header:
+  position: top                           # top | bottom | hidden
+  allow_manual: true
+labels: {}                                # see the table above
+cards:
+  - type: tile
+    entity: light.kitchen
+  - type: tile
+    entity: light.hallway
+    nearby_area: kitchen                  # pin this card to another room
+```
+
+Everything except `cards` is optional. The editor covers all of it: the cards through Home Assistant's own stack editor, the rest through a form.
+
+Requires Home Assistant **2024.11** or newer (that is when `getGridOptions` and the sections layout landed). Developed against 2026.8.
 
 ## What it does not do
 
