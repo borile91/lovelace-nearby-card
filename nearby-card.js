@@ -625,9 +625,13 @@
           schema: [
             { name: "entity", selector: { entity: {} } },
             {
+              /* no `default:` anywhere in this schema on purpose: ha-form
+                 fires value-changed when it fills a default in, which comes
+                 straight back as a config change and starts a loop. The
+                 defaults live in the card instead. */
               type: "grid", name: "", schema: [
-                { name: "area_attribute", selector: { text: {} }, default: "area_id" },
-                { name: "floor_attribute", selector: { text: {} }, default: "floor_id" },
+                { name: "area_attribute", selector: { text: {} } },
+                { name: "floor_attribute", selector: { text: {} } },
               ],
             },
             { name: "distance_entity", selector: { entity: { filter: [{ device_class: "distance" }] } } },
@@ -739,11 +743,30 @@
     setConfig(config) {
       this._config = { cards: [], ...config };
       if (this._selected > this._config.cards.length) this._selected = this._config.cards.length;
-      this._render();
+      this._sync();
     }
 
-    set hass(hass) { this._hass = hass; this._boot(); this._render(); }
-    set lovelace(lovelace) { this._lovelace = lovelace; this._render(); }
+    /* hass arrives on every state change in the house — hundreds of times a
+       minute. It must never rebuild anything: it hands the new object to the
+       children that already exist and stops there. Rebuilding here is what
+       froze the browser tab: a fresh child editor announces its config, which
+       comes back as a config change, which rebuilds again. */
+    set hass(hass) {
+      this._hass = hass;
+      this._boot();
+      if (!this._built) { this._sync(); return; }
+      for (const el of this._children()) el.hass = hass;
+    }
+
+    set lovelace(lovelace) {
+      this._lovelace = lovelace;
+      for (const el of this._children()) el.lovelace = lovelace;
+    }
+
+    _children() {
+      if (!this._built) return [];
+      return [this._form, this._cardEditor, this._picker].filter(Boolean);
+    }
 
     /* hui-card-element-editor and hui-card-picker are lazy-loaded by the
        frontend and are not there until some built-in stack editor has been
@@ -764,15 +787,20 @@
         /* the editor still works, minus the card picker */
         console.warn("nearby-card: could not preload the card editor", err);
       }
-      this._render();
+      this._sync();
     }
 
+    /* A config that says the same thing as the one we already have is not
+       worth announcing, and announcing it is exactly how a loop starts: the
+       dashboard hands it back through setConfig, which refreshes the form,
+       which announces it again. */
     _emit(config) {
+      if (JSON.stringify(config) === JSON.stringify(this._config)) return;
       this._config = config;
       this.dispatchEvent(new CustomEvent("config-changed", {
         detail: { config }, bubbles: true, composed: true,
       }));
-      this._render();
+      this._sync();
     }
 
     /* The form holds everything except the cards; the nested shape of the
@@ -816,73 +844,53 @@
       return out;
     }
 
-    _render() {
+    /* Everything below only ever updates what changed. The DOM is built once
+       in _build(); the child editors live as long as this editor does. */
+    _sync() {
       if (!this._hass) return;
-      if (!this._built) {
-        this.shadowRoot.innerHTML = `
-          <div class="wrap">
-            <div class="tabs"></div>
-            <div class="slot"></div>
-            <div class="form"></div>
-          </div>
-          <style>
-            .tabs { display:flex; flex-wrap:wrap; gap:4px; align-items:center; margin-bottom:8px; }
-            .tabs button { border:none; border-radius:12px; padding:5px 11px; font-size:13px;
-                           cursor:pointer; color:var(--secondary-text-color);
-                           background:var(--secondary-background-color, rgba(127,127,127,.14)); }
-            .tabs button.on { background:var(--primary-color); color:var(--text-primary-color,#fff); }
-            .toolbar { display:flex; gap:4px; margin:6px 0; }
-            .toolbar ha-icon-button { --mdc-icon-button-size:36px; }
-            .slot { margin-bottom:12px; }
-            .hint { font-size:12px; color:var(--secondary-text-color); margin:4px 2px 10px; }
-          </style>`;
-        this._built = true;
-      }
-      this._renderTabs();
-      this._renderSlot();
-      this._renderForm();
-    }
-
-    _renderTabs() {
-      const tabs = this.shadowRoot.querySelector(".tabs");
-      tabs.replaceChildren();
-      const n = this._config.cards.length;
-      for (let i = 0; i < n; i++) {
-        const b = document.createElement("button");
-        b.textContent = String(i + 1);
-        b.classList.toggle("on", i === this._selected);
-        b.addEventListener("click", () => { this._selected = i; this._render(); });
-        tabs.appendChild(b);
-      }
-      const plus = document.createElement("button");
-      plus.textContent = "+";
-      plus.title = "Add card";
-      plus.classList.toggle("on", this._selected === n);
-      plus.addEventListener("click", () => { this._selected = n; this._render(); });
-      tabs.appendChild(plus);
-    }
-
-    _renderSlot() {
-      const slot = this.shadowRoot.querySelector(".slot");
-      slot.replaceChildren();
-      const n = this._config.cards.length;
-
-      if (this._selected >= n) {
-        const picker = document.createElement("hui-card-picker");
-        picker.hass = this._hass;
-        picker.lovelace = this._lovelace;
-        picker.addEventListener("config-changed", (ev) => {
-          ev.stopPropagation();
-          const cards = [...this._config.cards, ev.detail.config];
-          this._selected = cards.length - 1;
-          this._emit({ ...this._config, cards });
-        });
-        slot.appendChild(picker);
+      /* Belt and braces. Every known way of looping is closed off above, but
+         an editor that spins is a tab the browser cannot recover from, and
+         the frontend is free to change its mind about when it fires events.
+         Fifty updates in a second is nothing a person can produce. */
+      const now = Date.now();
+      if (now - (this._burstStart || 0) > 1000) { this._burstStart = now; this._burst = 0; }
+      if (++this._burst > 50) {
+        if (!this._warned) {
+          this._warned = true;
+          console.warn("nearby-card: editor updating far too often, stopping to keep the tab alive");
+        }
         return;
       }
+      if (!this._built) this._build();
+      this._syncTabs();
+      this._syncSlot();
+      this._syncForm();
+    }
 
-      const bar = document.createElement("div");
-      bar.className = "toolbar";
+    _build() {
+      this.shadowRoot.innerHTML = `
+        <div class="tabs"></div>
+        <div class="slot">
+          <div class="toolbar"></div>
+          <div class="holder"></div>
+          <div class="hint">Cards are grouped by the area of their entity. Add
+            <code>nearby_area: &lt;area id&gt;</code> to a card to pin it to another room.</div>
+        </div>
+        <div class="form"></div>
+        <style>
+          .tabs { display:flex; flex-wrap:wrap; gap:4px; align-items:center; margin-bottom:8px; }
+          .tabs button { border:none; border-radius:12px; padding:5px 11px; font-size:13px;
+                         cursor:pointer; color:var(--secondary-text-color);
+                         background:var(--secondary-background-color, rgba(127,127,127,.14)); }
+          .tabs button.on { background:var(--primary-color); color:var(--text-primary-color,#fff); }
+          .toolbar { display:flex; gap:4px; margin:2px 0 6px; }
+          .toolbar ha-icon-button { --mdc-icon-button-size:36px; }
+          .slot { margin-bottom:12px; }
+          .hint { font-size:12px; color:var(--secondary-text-color); margin:8px 2px 0; }
+          .hint code { font-size:11.5px; }
+        </style>`;
+
+      const bar = this.shadowRoot.querySelector(".toolbar");
       const tool = (icon, title, fn) => {
         const b = document.createElement("ha-icon-button");
         b.title = title;
@@ -905,47 +913,101 @@
         this._selected = Math.max(0, this._selected - 1);
         this._emit({ ...this._config, cards });
       });
-      slot.appendChild(bar);
 
-      const ed = document.createElement("hui-card-element-editor");
-      ed.hass = this._hass;
-      ed.lovelace = this._lovelace;
-      ed.value = this._config.cards[this._selected];
-      ed.addEventListener("config-changed", (ev) => {
+      const holder = this.shadowRoot.querySelector(".holder");
+
+      this._cardEditor = document.createElement("hui-card-element-editor");
+      this._cardEditor.hass = this._hass;
+      this._cardEditor.lovelace = this._lovelace;
+      this._cardEditor.addEventListener("config-changed", (ev) => {
         ev.stopPropagation();
+        if (this._applying) return;      /* our own value landing, not a user edit */
         const cards = [...this._config.cards];
         cards[this._selected] = ev.detail.config;
         this._emit({ ...this._config, cards });
       });
-      ed.addEventListener("GUImode-changed", (ev) => {
+      this._cardEditor.addEventListener("GUImode-changed", (ev) => {
         ev.stopPropagation();
         this._guiMode = ev.detail.guiMode;
       });
-      slot.appendChild(ed);
+      holder.appendChild(this._cardEditor);
 
-      const hint = document.createElement("div");
-      hint.className = "hint";
-      hint.textContent =
-        "This card is grouped by the area of its entity. Add `nearby_area: <area id>` to its YAML to pin it to another room.";
-      slot.appendChild(hint);
+      this._form = document.createElement("ha-form");
+      this._form.computeLabel = (s) => FORM_LABELS[s.name] || undefined;
+      this._form.computeHelper = (s) => FORM_HELPERS[s.name] || undefined;
+      this._form.hass = this._hass;
+      this._form.schema = FORM_SCHEMA();
+      this._form.addEventListener("value-changed", (ev) => {
+        ev.stopPropagation();
+        if (this._applying) return;
+        this._emit(this._fromForm(ev.detail.value));
+      });
+      this.shadowRoot.querySelector(".form").appendChild(this._form);
+
+      this._built = true;
     }
 
-    _renderForm() {
-      const box = this.shadowRoot.querySelector(".form");
-      let form = box.querySelector("ha-form");
-      if (!form) {
-        form = document.createElement("ha-form");
-        form.computeLabel = (s) => FORM_LABELS[s.name] || undefined;
-        form.computeHelper = (s) => FORM_HELPERS[s.name] || undefined;
-        form.addEventListener("value-changed", (ev) => {
-          ev.stopPropagation();
-          this._emit(this._fromForm(ev.detail.value));
-        });
-        box.appendChild(form);
-      }
-      form.hass = this._hass;
-      form.schema = FORM_SCHEMA();
-      form.data = this._formData();
+    _syncTabs() {
+      const tabs = this.shadowRoot.querySelector(".tabs");
+      const n = this._config.cards.length;
+      const want = `${n}/${this._selected}`;
+      if (tabs.dataset.state === want) return;
+      tabs.dataset.state = want;
+
+      tabs.replaceChildren();
+      const tab = (text, index, title) => {
+        const b = document.createElement("button");
+        b.textContent = text;
+        if (title) b.title = title;
+        b.classList.toggle("on", index === this._selected);
+        b.addEventListener("click", () => { this._selected = index; this._sync(); });
+        tabs.appendChild(b);
+      };
+      for (let i = 0; i < n; i++) tab(String(i + 1), i);
+      tab("+", n, "Add card");
+    }
+
+    /* The card picker draws a live preview of every card type there is. That
+       is a lot of work to do for something behind a "+" nobody has pressed
+       yet, so it is built the first time it is actually asked for. */
+    _ensurePicker() {
+      if (this._picker) return this._picker;
+      this._picker = document.createElement("hui-card-picker");
+      this._picker.hass = this._hass;
+      this._picker.lovelace = this._lovelace;
+      this._picker.addEventListener("config-changed", (ev) => {
+        ev.stopPropagation();
+        if (this._applying) return;
+        const cards = [...this._config.cards, ev.detail.config];
+        this._selected = cards.length - 1;
+        this._emit({ ...this._config, cards });
+      });
+      this.shadowRoot.querySelector(".holder").appendChild(this._picker);
+      return this._picker;
+    }
+
+    _syncSlot() {
+      const adding = this._selected >= this._config.cards.length;
+      this.shadowRoot.querySelector(".toolbar").style.display = adding ? "none" : "";
+      this.shadowRoot.querySelector(".hint").style.display = adding ? "none" : "";
+      this._cardEditor.style.display = adding ? "none" : "";
+      if (adding) this._ensurePicker().style.display = "";
+      else if (this._picker) this._picker.style.display = "none";
+      if (adding) return;
+
+      const value = this._config.cards[this._selected];
+      if (JSON.stringify(this._cardEditor.value) === JSON.stringify(value)) return;
+      this._applying = true;
+      this._cardEditor.value = value;
+      this._applying = false;
+    }
+
+    _syncForm() {
+      const data = this._formData();
+      if (JSON.stringify(this._form.data) === JSON.stringify(data)) return;
+      this._applying = true;
+      this._form.data = data;
+      this._applying = false;
     }
   }
 

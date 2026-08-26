@@ -44,7 +44,12 @@
 </style>
 </head>
 <body>
+<pre id="results" style="width:100%;font:12px/1.5 ui-monospace,monospace;color:#333">RESULTS\n(script did not finish)</pre>
 <script>
+  window.onerror = (msg, src, line, col) => {
+    const p = document.getElementById("results");
+    if (p) p.textContent += `\nJS ERROR ${msg} @${(src||"").split("/").pop()}:${line}:${col}`;
+  };
   /* ---- stubs of the Home Assistant components the card touches ---------- */
   customElements.define("ha-card", class extends HTMLElement {
     connectedCallback() {
@@ -82,6 +87,37 @@
     }
   });
   window.loadCardHelpers = async () => ({ createCardElement: () => document.createElement("div") });
+
+  /* Stubs for the editor's children. ha-form is deliberately built to be
+     nasty: it announces value-changed every time someone assigns .data, the
+     way the real one does when it fills in a schema default. That is what
+     froze a browser tab once, so the editor has to survive it here. */
+  customElements.define("ha-form", class extends HTMLElement {
+    set data(v) {
+      this._data = v;
+      this.dispatchEvent(new CustomEvent("value-changed", {
+        detail: { value: v }, bubbles: true, composed: true,
+      }));
+    }
+    get data() { return this._data; }
+    set schema(v) { this._schema = v; }
+    set hass(v) { this._hass = v; }
+  });
+  for (const tag of ["hui-card-element-editor", "hui-card-picker"]) {
+    customElements.define(tag, class extends HTMLElement {
+      set value(v) {
+        this._value = v;
+        /* the real element re-announces the config it is given */
+        this.dispatchEvent(new CustomEvent("config-changed", {
+          detail: { config: v }, bubbles: true, composed: true,
+        }));
+      }
+      get value() { return this._value; }
+      set hass(v) { this._hass = v; }
+      set lovelace(v) { this._lovelace = v; }
+    });
+  }
+  customElements.define("ha-icon-button", class extends HTMLElement {});
 </script>
 <script src="../nearby-card.js"></script>
 <script>
@@ -286,15 +322,82 @@
                  (got === true ? "" : "  (" + got + ")"));
   }
 
+  /* ---- the editor, which is where the loops hide ------------------------ */
+  if (!HERO) {
+    const box = document.createElement("div");
+    box.className = "case";
+    box.innerHTML = "<h3>9. Editor does not loop</h3>" +
+      '<p class="expect">A quiet hass update changes nothing; one edit says so once</p>';
+    document.body.appendChild(box);
+
+    const ed = document.createElement("nearby-card-editor");
+    let announced = 0, lastConfig = null;
+    ed.addEventListener("config-changed", (e) => { announced++; lastConfig = e.detail.config; });
+    box.appendChild(ed);
+
+    const problems = [];
+    ed.setConfig(JSON.parse(JSON.stringify(BASE_CONFIG)));
+    ed.hass = baseHass();
+    ed.lovelace = { config: {} };
+
+    /* the dashboard hands hass back on every state change in the house */
+    const nodesBefore = ed.shadowRoot.querySelectorAll("*").length;
+    const afterFirstBuild = announced;
+    for (let i = 0; i < 50; i++) ed.hass = baseHass();
+    const nodesAfter = ed.shadowRoot.querySelectorAll("*").length;
+
+    if (announced !== afterFirstBuild) {
+      problems.push(`${announced - afterFirstBuild} config changes from idle hass updates`);
+    }
+    if (nodesAfter !== nodesBefore) {
+      problems.push(`DOM went from ${nodesBefore} to ${nodesAfter} nodes`);
+    }
+
+    /* a real edit: exactly one announcement, and it carries the change */
+    announced = 0;
+    ed._form.dispatchEvent(new CustomEvent("value-changed", {
+      detail: { value: { ...ed._formData(), grouping: "none" } },
+      bubbles: true, composed: true,
+    }));
+    if (announced !== 1) problems.push(`one edit announced ${announced} times`);
+    if (!lastConfig || lastConfig.grouping !== "none") problems.push("the edit did not carry through");
+
+    /* the dashboard echoes the new config back, as it does */
+    announced = 0;
+    ed.setConfig(lastConfig);
+    if (announced !== 0) problems.push(`the echo bounced back ${announced} times`);
+
+    /* the card picker previews every card type there is: it must not exist
+       until someone presses "+", and it must not be rebuilt after that */
+    if (ed.shadowRoot.querySelector("hui-card-picker")) {
+      problems.push("card picker built before it was asked for");
+    }
+    ed._selected = ed._config.cards.length;
+    ed._sync();
+    const pickers = ed.shadowRoot.querySelectorAll("hui-card-picker").length;
+    const firstPicker = ed.shadowRoot.querySelector("hui-card-picker");
+    for (let i = 0; i < 20; i++) ed.hass = baseHass();
+    ed._sync();
+    if (pickers !== 1) problems.push(`${pickers} card pickers after pressing +`);
+    if (ed.shadowRoot.querySelector("hui-card-picker") !== firstPicker) {
+      problems.push("card picker was rebuilt");
+    }
+
+    const v = document.createElement("p");
+    v.className = "verdict " + (problems.length ? "ko" : "ok");
+    v.textContent = problems.length ? "FAIL — " + problems.join("; ") : "PASS";
+    box.appendChild(v);
+    results.push((problems.length ? "FAIL" : "PASS") + "  9. Editor does not loop" +
+                 (problems.length ? "  (" + problems.join("; ") + ")" : ""));
+  }
+
   /* Put the verdicts where a headless run can read them without a screenshot:
      `chrome --headless --dump-dom | grep -A20 RESULTS` */
-  const summary = document.createElement("pre");
-  summary.id = "results";
+  const summary = document.getElementById("results");
   summary.style.cssText = "width:100%;font:12px/1.5 ui-monospace,monospace;color:#333";
   if (HERO) summary.style.display = "none";
   summary.textContent = "RESULTS\n" + results.join("\n") +
     `\n${results.filter((r) => r.startsWith("PASS")).length}/${results.length} passed`;
-  document.body.appendChild(summary);
   document.title = `Nearby Card — ${results.filter((r) => r.startsWith("PASS")).length}/${results.length} passed`;
 </script>
 </body>
