@@ -18,21 +18,34 @@ A dashboard of twenty lights and blinds is a scrolling list where the three you 
 
 ## Install
 
-### HACS
+### HACS (recommended)
 
-1. HACS → Dashboard → three dots → **Custom repositories**
-2. Add `https://github.com/borile91/lovelace-nearby-card`, category **Dashboard**
-3. Install, then reload the page
+This card is not in the HACS default store, so HACS has to be told where it
+lives. That is what a **custom repository** is, and adding one takes a minute:
 
-### Manually
+1. Open **HACS** in the sidebar
+2. Top right **⋮** → **Custom repositories**
+3. Paste `https://github.com/borile91/lovelace-nearby-card` in **Repository**
+4. Choose **Dashboard** as the type — it is called `plugin` in older HACS — and press **Add**
+5. Close the dialog. The card is now in the list like any other: search for **Nearby Card**, open it, **Download**
+6. Reload the browser page (a hard reload if the card does not turn up: the old JavaScript can sit in the cache)
 
-Copy `nearby-card.js` into `config/www/` and add it as a dashboard resource:
+HACS puts the file in `config/www/community/lovelace-nearby-card/` and registers the dashboard resource itself — nothing to add by hand. Updates arrive in HACS the usual way, from the releases of this repository.
+
+Then add the card to a dashboard: **Edit dashboard** → **Add card** → search for **Nearby Card**.
+
+### Manually, without HACS
+
+Only if you would rather not use HACS. Copy `nearby-card.js` into `config/www/` and register it once:
+
+**Settings → Dashboards → ⋮ → Resources → Add resource**
 
 ```yaml
-# Settings → Dashboards → three dots → Resources
 url: /local/nearby-card.js
 type: module
 ```
+
+Updating then means copying the file over again yourself. If you later move to HACS, **remove this resource first**: two resources for the same card load it twice, and which one wins is not up to you.
 
 ## Quick start
 
