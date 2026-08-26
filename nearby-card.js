@@ -41,7 +41,7 @@
 
   const CARD_TYPE = "nearby-card";
   const EDITOR_TAG = "nearby-card-editor";
-  const VERSION = "1.4.0";
+  const VERSION = "1.5.0";
 
   const UNKNOWN = ["unknown", "unavailable", "none", "not_home", ""];
 
@@ -76,6 +76,9 @@
     /* cards that count as "here" on top of the ones whose area matches:
        [{ area: <area_id>, entities: [<entity_id>, ...] }] */
     nearby: [],
+    /* which rooms are close to which, nearest first:
+       [{ area: <area_id>, then: [<area_id>, ...] }] */
+    neighbours: [],
     grouping: "area_floor_rest",   /* area_floor_rest | area_rest | floor | none */
     sort: "config",                /* config | name | nearby */
     group_icons: false,            /* draw the area/floor icon beside the heading */
@@ -206,6 +209,15 @@
       this._labels = { ...DEFAULT_LABELS, ...(this._config.labels || {}) };
       /* the lent-card table is a list in YAML, because that is what the UI
          editor can build; inside it is handier as area -> Set of entities */
+      /* rooms in order of closeness to a given room. A house is not a list,
+         but from any one room it is: from the bedroom the walk-in is next
+         door, the study is across the landing, the back bedroom is at the far
+         end. Only the order matters here, not any notion of distance. */
+      this._near = new Map();
+      for (const row of this._config.neighbours || []) {
+        if (!row || !row.area || !Array.isArray(row.then)) continue;
+        this._near.set(row.area, row.then);
+      }
       this._lent = new Map();
       for (const row of this._config.nearby || []) {
         if (!row || !row.area) continue;
@@ -535,8 +547,16 @@
     _roomFirst(cards, where) {
       if (this._config.sort !== "nearby" || !where.area) return cards;
       const lent = this._lent.get(where.area) || new Set();
-      const here = (t) => t.area === where.area || lent.has(t.entity);
-      return [...cards].sort((a, b) => (here(b) ? 1 : 0) - (here(a) ? 1 : 0));
+      const order = this._near.get(where.area) || [];
+      /* 0 = the room you are in, or a card lent to it; then the rooms listed
+         as its neighbours, in the order given; then everything else, which
+         keeps the order it already had. */
+      const rank = (t) => {
+        if (t.area === where.area || lent.has(t.entity)) return 0;
+        const i = order.indexOf(t.area);
+        return i === -1 ? order.length + 1 : i + 1;
+      };
+      return [...cards].sort((a, b) => rank(a) - rank(b));
     }
 
     _render() {
@@ -761,6 +781,26 @@
       ],
     },
     {
+      name: "neighbours", type: "expandable", flatten: true,
+      icon: "mdi:home-floor-g", title: "Which rooms are close to which",
+      schema: [
+        {
+          name: "neighbours", selector: {
+            object: {
+              multiple: true,
+              label_field: "area",
+              description_field: "then",
+              fields: {
+                area: { label: "When I am in", required: true, selector: { area: {} } },
+                then: { label: "Nearest rooms, closest first", required: true,
+                        selector: { area: { multiple: true } } },
+              },
+            },
+          },
+        },
+      ],
+    },
+    {
       name: "layout", type: "expandable", flatten: true, icon: "mdi:view-agenda", title: "Layout",
       schema: [
         {
@@ -811,6 +851,7 @@
     area_sensors: "One sensor per room. When several are on, the most recent one wins.",
     nearby: "A card belongs to the area of its entity. Here you can lend it to another room as well — a window registered in the living room that sits right by the bathroom door.",
     group_icons: "The area or floor icon from Home Assistant. Floors without one fall back to their storey number.",
+    neighbours: "Used by the \u201cRoom you are in first\u201d order: after your own room come these, in the order you list them. Rooms you leave out keep the order the cards have.",
   };
 
   class NearbyCardEditor extends HTMLElement {
@@ -913,6 +954,7 @@
         priority: (p.priority || DEFAULTS.presence.priority).join(","),
         manual_minutes: p.manual_minutes ?? DEFAULTS.presence.manual_minutes,
         nearby: c.nearby || [],
+        neighbours: c.neighbours || [],
         grouping: c.grouping ?? DEFAULTS.grouping,
         sort: c.sort ?? DEFAULTS.sort,
         group_icons: c.group_icons ?? DEFAULTS.group_icons,
@@ -937,6 +979,8 @@
       if (!Object.keys(out.presence).length) delete out.presence;
       if (v.nearby && v.nearby.length) out.nearby = v.nearby;
       else delete out.nearby;
+      if (v.neighbours && v.neighbours.length) out.neighbours = v.neighbours;
+      else delete out.neighbours;
       out.grouping = v.grouping;
       out.sort = v.sort;
       out.group_icons = v.group_icons;

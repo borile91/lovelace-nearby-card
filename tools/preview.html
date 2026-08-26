@@ -211,6 +211,11 @@
       priority: ["area_sensors", "area_sensor"],
     },
     nearby: [{ area: "bathroom", entities: ["cover.back_window"] }],
+    neighbours: [
+      /* from the bedroom: the study is across the landing, the kitchen is the
+         one you pass first downstairs */
+      { area: "bedroom", then: ["study", "kitchen"] },
+    ],
   };
 
   /* ---- the cases -------------------------------------------------------- */
@@ -349,6 +354,28 @@
         const first = groupEntities(card, 0);
         return first[0] === "light.bedroom" && first[1] === "cover.bedroom_blind"
           ? true : "order upstairs: " + first.join(" ");
+      },
+    },
+    {
+      title: "8f. Neighbours decide what comes after your room",
+      expect: "Upstairs: bedroom then study. Ground floor: kitchen first",
+      config: { ...BASE_CONFIG, grouping: "floor", sort: "nearby" },
+      hass: (h) => {
+        h.states["sensor.phone_area"].state = "Bedroom";
+        h.states["sensor.phone_area"].attributes =
+          { friendly_name: "Phone area", area_id: "bedroom", floor_id: "upstairs" };
+        return h;
+      },
+      check: (card) => {
+        const up = groupEntities(card, 0);
+        const down = groupEntities(card, 1);
+        if (up[0] !== "light.bedroom" || up[up.length - 1] !== "light.study") {
+          return "upstairs: " + up.join(" ");
+        }
+        /* the kitchen is listed as a neighbour, so its cards lead the floor
+           below even though the living room comes first in the config */
+        return down[0].endsWith("kitchen") || down[0] === "cover.kitchen_blind"
+          ? true : "ground floor: " + down.join(" ");
       },
     },
     {

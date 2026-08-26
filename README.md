@@ -152,6 +152,7 @@ cards:
 | `presence.priority` | `[area_sensors, area_sensor]` | Which source is asked first. |
 | `presence.manual_minutes` | `20` | How long a room picked by hand lasts. |
 | `nearby` | `[]` | Cards lent to another room: `area`, `entities`. |
+| `neighbours` | `[]` | Which rooms are close to which: `area`, `then`. Used by `sort: nearby`. |
 | `grouping` | `area_floor_rest` | See below. |
 | `sort` | `config` | Order inside each group: see below. |
 | `group_icons` | `false` | Draw the area or floor icon beside each heading. |
@@ -183,6 +184,20 @@ When nothing knows where you are, any grouping other than `none` falls back to `
 `nearby` is worth having with `grouping: floor`. Grouping by floor already knows which floor you are on, but you are not on a floor — you are *in a room*, and that is the finer thing your presence sensors are telling you. Without it the first card of your floor is simply the first one in the list, which is how you end up looking at the study while standing in the bedroom.
 
 It sorts *inside* each group and never across groups: the grouping decides what comes first, this decides what comes first within it. Cards lent to the room by `nearby` rise with it.
+
+What comes *after* your own room is up to you, with `neighbours`:
+
+```yaml
+neighbours:
+  - area: bedroom
+    then: [walk_in, study, bathroom_upstairs, back_bedroom]
+  - area: back_bedroom
+    then: [study, bathroom_upstairs, walk_in, bedroom]
+```
+
+A house is not a list, but from any one room it is: from the bedroom the walk-in is next door, the study is across the landing, the back bedroom is at the far end. Rooms you leave out of `then` keep the order their cards already had, so a partial table is fine — start with the rooms you actually walk between.
+
+This is worth pairing with `nearby` for the floor below. Rooms stack: if the back bedroom sits above the downstairs bathroom, then standing in the back bedroom the shutter you may want next is the one under your feet, even though it belongs to another area entirely.
 
 Headings are Home Assistant's own **heading card**, not something drawn here to look like one — the group you are in gets the `title` style, the others `subtitle`. So they match the headings already sitting in your dashboard, and they keep matching when Home Assistant changes them.
 
@@ -255,6 +270,9 @@ presence:
 nearby:                                   # cards lent to a neighbouring room
   - area: bathroom
     entities: [cover.back_window]
+neighbours:                               # what comes after your own room
+  - area: bedroom
+    then: [walk_in, study]
 grouping: area_floor_rest                 # area_floor_rest | area_rest | floor | none
 sort: config                              # config | name
 group_icons: false
