@@ -137,11 +137,24 @@ cards:
 | `presence.priority` | `[area_sensors, area_sensor]` | Which source is asked first. |
 | `presence.manual_minutes` | `20` | How long a room picked by hand lasts. |
 | `nearby` | `[]` | Cards lent to another room: `area`, `entities`. |
-| `grouping` | `area_floor_rest` | `area_floor_rest`, `area_rest`, or `none` for a flat list. |
+| `grouping` | `area_floor_rest` | See below. |
 | `sort` | `config` | `config` keeps your order, `name` sorts alphabetically inside each group. |
 | `header.position` | `top` | `top`, `bottom`, or `hidden`. |
 | `header.allow_manual` | `true` | Show the crosshair button. |
 | `labels` | – | Override any of the strings the card shows. |
+
+### Grouping
+
+| `grouping` | Groups |
+| --- | --- |
+| `area_floor_rest` *(default)* | The room you are in, the rest of that floor, everything else |
+| `area_rest` | The room you are in, everything else |
+| `floor` | One group per floor, the one you are on first |
+| `none` | A single flat list, no headings |
+
+`floor` is the one to pick when the house is more vertical than it is wide, or when presence is only good enough to tell the floors apart — which is often the case with a single area sensor and few receivers. Floors come in the order they are stacked (their `level` in Home Assistant), except the one you are on, which jumps to the top and is highlighted. Cards whose area has no floor land in a group of their own, named by the `no_floor` label.
+
+When nothing knows where you are, any grouping other than `none` falls back to `floor`.
 
 ### Labels
 

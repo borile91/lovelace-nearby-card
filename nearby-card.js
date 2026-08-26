@@ -427,6 +427,9 @@
 
     _groups(where, items) {
       const L = this._labels;
+      /* by floor, whatever the room: the floor you are on comes first, the
+         others below it in the order the stairs go */
+      if (this._config.grouping === "floor") return this._byFloor(items, where.floor, true);
       if (this._config.grouping === "none" || (!where.area && !where.floor)) {
         if (this._config.grouping === "none") return [{ key: "all", cards: items }];
         return this._byFloor(items);
@@ -460,19 +463,29 @@
       return out;
     }
 
-    /* Away, or nothing known: group by floor, bottom one first. */
-    _byFloor(items) {
+    /* One group per floor, bottom one first. `here` is the floor you are on,
+       which jumps to the top; `always` keeps the headings even when there is
+       only one floor to show, which is what someone asking for grouping by
+       floor means, as opposed to falling back to it because nothing else is
+       known. */
+    _byFloor(items, here = null, always = false) {
       const perFloor = new Map();
       for (const it of items) {
         const k = it.floor || "_";
         if (!perFloor.has(k)) perFloor.set(k, []);
         perFloor.get(k).push(it);
       }
-      if (perFloor.size < 2) return [{ key: "all", cards: items }];
+      if (!always && perFloor.size < 2) return [{ key: "all", cards: items }];
       return [...perFloor.keys()]
-        .sort((a, b) => this._floorLevel(a) - this._floorLevel(b))
+        .sort((a, b) => {
+          if (a === b) return 0;
+          if (a === here) return -1;
+          if (b === here) return 1;
+          return this._floorLevel(a) - this._floorLevel(b);
+        })
         .map((k) => ({
           key: `floor_${k}`,
+          here: k === here,
           title: k === "_" ? this._labels.no_floor : this._floorName(k),
           cards: perFloor.get(k),
         }));
@@ -690,6 +703,7 @@
             { name: "grouping", selector: { select: { mode: "dropdown", options: [
               { value: "area_floor_rest", label: "Room, rest of floor, elsewhere" },
               { value: "area_rest", label: "Room, everything else" },
+              { value: "floor", label: "By floor, yours first" },
               { value: "none", label: "One list, no headings" },
             ] } } },
             { name: "sort", selector: { select: { mode: "dropdown", options: [

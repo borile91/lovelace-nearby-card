@@ -267,6 +267,34 @@
       check: (card) => firstGroup(card) === "Bedroom",
     },
     {
+      title: "8b. Grouped by floor, yours first",
+      hero: "Grouped by floor",
+      expect: "Ground floor on top because you are on it, then upstairs",
+      config: { ...BASE_CONFIG, grouping: "floor" },
+      hass: (h) => h,
+      check: (card) => {
+        const caps = [...card.shadowRoot.querySelectorAll(".caption")].map((c) => c.textContent);
+        if (caps.join() !== "Ground floor,Upstairs") return "headings: " + caps.join(" / ");
+        /* the floor you are on is the highlighted one */
+        return card.shadowRoot.querySelector(".caption").classList.contains("here")
+          ? true : "your floor is not highlighted";
+      },
+    },
+    {
+      title: "8c. By floor, but you are upstairs",
+      expect: "Upstairs jumps above the ground floor",
+      config: { ...BASE_CONFIG, grouping: "floor" },
+      hass: (h) => {
+        h.states["binary_sensor.study_presence"].state = "on";
+        h.states["binary_sensor.study_presence"].last_changed = ago(1);
+        return h;
+      },
+      check: (card) => {
+        const caps = [...card.shadowRoot.querySelectorAll(".caption")].map((c) => c.textContent);
+        return caps.join() === "Upstairs,Ground floor" ? true : "headings: " + caps.join(" / ");
+      },
+    },
+    {
       title: "8. No grouping, position hidden",
       expect: "One flat list, no headings, no position line",
       config: { ...BASE_CONFIG, grouping: "none", header: { position: "hidden" } },
