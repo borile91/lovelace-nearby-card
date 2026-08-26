@@ -1,0 +1,301 @@
+<!doctype html>
+<!-- Offline preview for nearby-card.js.
+
+     Home Assistant is not here, so this page stubs the few pieces of it the
+     card touches — <ha-card>, <ha-icon>, and <hui-card>, which stands in for
+     whatever card you nest — and feeds the card a fake `hass` with a small
+     made-up house: two floors, five areas, a handful of entities.
+
+     What it proves: the grouping, the order, the header, the room chips, and
+     that each presence source wins when it should. What it cannot prove: how
+     the nested cards actually look, since those are real Home Assistant
+     components. Check that in Home Assistant.
+
+     Run it:
+
+       open tools/preview.html
+
+     or, for a screenshot:
+
+       /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+         --headless=new --disable-gpu --allow-file-access-from-files \
+         --virtual-time-budget=3000 --window-size=1500,1000 \
+         --screenshot=/tmp/preview.png "file://$PWD/tools/preview.html"
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Nearby Card — offline preview</title>
+<style>
+  :root {
+    --primary-text-color:#212121; --secondary-text-color:#727272;
+    --divider-color:rgba(0,0,0,.12); --primary-color:#03a9f4;
+    --card-background-color:#fff; --secondary-background-color:#eef0f2;
+    --text-primary-color:#fff; --disabled-text-color:#bdbdbd;
+    font-family:Roboto,system-ui,sans-serif;
+  }
+  body { margin:0; padding:14px; background:#fafafa; display:flex; flex-wrap:wrap;
+         gap:14px; align-items:flex-start; }
+  .case { width:330px; }
+  h3 { font:600 13px/1.35 system-ui; color:#555; margin:0 0 6px; }
+  .expect { font:400 11.5px/1.35 system-ui; color:#888; margin:0 0 6px; }
+  .verdict { font:600 12px/1.4 system-ui; margin:6px 0 0; }
+  .ok { color:#2e7d32; } .ko { color:#c62828; }
+</style>
+</head>
+<body>
+<script>
+  /* ---- stubs of the Home Assistant components the card touches ---------- */
+  customElements.define("ha-card", class extends HTMLElement {
+    connectedCallback() {
+      this.style.cssText = "display:block;background:var(--card-background-color);" +
+        "border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.16)";
+    }
+  });
+  customElements.define("ha-icon", class extends HTMLElement {
+    connectedCallback() {
+      this.style.cssText = "display:inline-block;width:26px;height:26px;" +
+        "border-radius:50%;background:currentColor;opacity:.8";
+    }
+  });
+  /* Stand-in for a nested card: shows what it was given, nothing more. */
+  customElements.define("hui-card", class extends HTMLElement {
+    set config(c) { this._c = c; this._draw(); }
+    set hass(h) { this._h = h; this._draw(); }
+    set preview(v) { this._p = v; }
+    load() { this._loaded = true; this._draw(); }
+    getCardSize() { return 1; }
+    _draw() {
+      if (!this._c || !this._h) return;
+      const id = this._c.entity || "(no entity)";
+      const s = this._h.states[id];
+      const name = this._c.name || (s && s.attributes.friendly_name) || id;
+      this.style.cssText = "display:block;background:var(--card-background-color);" +
+        "border:1px solid var(--divider-color);border-radius:11px;padding:7px 10px";
+      this.innerHTML =
+        '<div style="display:flex;gap:8px;align-items:center">' +
+        '<span style="width:22px;height:22px;border-radius:50%;flex:none;background:' +
+        (s && s.state === "on" ? "var(--primary-color)" : "#9aa0a6") + ';opacity:.3"></span>' +
+        '<div style="min-width:0"><div style="font-size:13px">' + name + '</div>' +
+        '<div style="font-size:11px;color:var(--secondary-text-color)">' + id + '</div>' +
+        '</div></div>';
+    }
+  });
+  window.loadCardHelpers = async () => ({ createCardElement: () => document.createElement("div") });
+</script>
+<script src="../nearby-card.js"></script>
+<script>
+  /* ---- a small made-up house ------------------------------------------- */
+  const FLOORS = {
+    ground: { floor_id: "ground", name: "Ground floor", level: 0 },
+    upstairs: { floor_id: "upstairs", name: "Upstairs", level: 1 },
+  };
+  const AREAS = {
+    kitchen:  { area_id: "kitchen",  name: "Kitchen",  floor_id: "ground" },
+    living:   { area_id: "living",   name: "Living room", floor_id: "ground" },
+    bathroom: { area_id: "bathroom", name: "Bathroom", floor_id: "ground" },
+    bedroom:  { area_id: "bedroom",  name: "Bedroom",  floor_id: "upstairs" },
+    study:    { area_id: "study",    name: "Study",    floor_id: "upstairs" },
+  };
+  /* entity -> area, plus a friendly name and a state */
+  const ENTITIES = {
+    "light.kitchen":        ["kitchen",  "Kitchen light", "on"],
+    "cover.kitchen_blind":  ["kitchen",  "Kitchen blind", "open"],
+    "switch.coffee":        ["kitchen",  "Coffee machine", "off"],
+    "light.living":         ["living",   "Living room light", "on"],
+    "cover.back_window":    ["living",   "Back window", "open"],
+    "media_player.tv":      ["living",   "TV", "off"],
+    "light.bathroom":       ["bathroom", "Bathroom light", "off"],
+    "light.bedroom":        ["bedroom",  "Bedroom light", "off"],
+    "cover.bedroom_blind":  ["bedroom",  "Bedroom blind", "closed"],
+    "light.study":          ["study",    "Study light", "off"],
+  };
+
+  const states = {}, entities = {};
+  for (const [id, [area, name, state]] of Object.entries(ENTITIES)) {
+    states[id] = { entity_id: id, state, attributes: { friendly_name: name } };
+    entities[id] = { entity_id: id, area_id: area, device_id: null };
+  }
+  const now = new Date();
+  const ago = (min) => new Date(now.getTime() - min * 60000).toISOString();
+
+  /* presence entities the cases play with */
+  Object.assign(states, {
+    "sensor.phone_area": { entity_id: "sensor.phone_area", state: "Living room",
+      attributes: { friendly_name: "Phone area", area_id: "living", floor_id: "ground" } },
+    "sensor.phone_distance": { entity_id: "sensor.phone_distance", state: "0.9",
+      attributes: { friendly_name: "Phone distance", device_class: "distance", unit_of_measurement: "m" } },
+    "binary_sensor.bathroom_presence": { entity_id: "binary_sensor.bathroom_presence", state: "off",
+      last_changed: ago(90), attributes: { friendly_name: "Bathroom presence" } },
+    "binary_sensor.study_presence": { entity_id: "binary_sensor.study_presence", state: "off",
+      last_changed: ago(90), attributes: { friendly_name: "Study presence" } },
+  });
+
+  const baseHass = () => ({
+    states: JSON.parse(JSON.stringify(states)),
+    entities, areas: AREAS, floors: FLOORS,
+    callService: (d, s, o) => console.log("callService", d, s, o),
+  });
+
+  const CARDS = Object.keys(ENTITIES).map((entity) => ({ type: "tile", entity }));
+
+  const BASE_CONFIG = {
+    type: "custom:nearby-card",
+    cards: CARDS,
+    presence: {
+      area_sensor: {
+        entity: "sensor.phone_area",
+        distance_entity: "sensor.phone_distance",
+        max_distance: 3.5,
+      },
+      area_sensors: [
+        { area: "bathroom", entity: "binary_sensor.bathroom_presence" },
+        { area: "study", entity: "binary_sensor.study_presence" },
+      ],
+      priority: ["area_sensors", "area_sensor"],
+    },
+    nearby: [{ area: "bathroom", entities: ["cover.back_window"] }],
+  };
+
+  /* ---- the cases -------------------------------------------------------- */
+  const CASES = [
+    {
+      title: "1. Area sensor: living room, close by",
+      hero: "In the living room",
+      expect: "Living room first, then rest of ground floor, then upstairs",
+      config: BASE_CONFIG,
+      hass: (h) => h,
+      check: (card) => firstGroup(card) === "Living room",
+    },
+    {
+      title: "2. Same, but 6.3 m away",
+      expect: "Room dropped, ground floor kept, note says why",
+      config: BASE_CONFIG,
+      hass: (h) => { h.states["sensor.phone_distance"].state = "6.3"; return h; },
+      check: (card) => firstGroup(card) === "Ground floor" && note(card).includes("6.3"),
+    },
+    {
+      title: "3. Room sensor wins over the area sensor",
+      hero: "In the bathroom — with the window lent to it",
+      expect: "Bathroom first, and the lent back window with it",
+      config: BASE_CONFIG,
+      hass: (h) => {
+        h.states["binary_sensor.bathroom_presence"].state = "on";
+        h.states["binary_sensor.bathroom_presence"].last_changed = ago(1);
+        return h;
+      },
+      check: (card) => firstGroup(card) === "Bathroom" && groupEntities(card, 0).includes("cover.back_window"),
+    },
+    {
+      title: "4. Two room sensors on: newest wins",
+      expect: "Study, triggered a minute ago, beats the bathroom from an hour ago",
+      config: BASE_CONFIG,
+      hass: (h) => {
+        h.states["binary_sensor.bathroom_presence"].state = "on";
+        h.states["binary_sensor.bathroom_presence"].last_changed = ago(60);
+        h.states["binary_sensor.study_presence"].state = "on";
+        h.states["binary_sensor.study_presence"].last_changed = ago(1);
+        return h;
+      },
+      check: (card) => firstGroup(card) === "Study",
+    },
+    {
+      title: "5. Nothing knows where you are",
+      expect: "No reordering: grouped by floor, ground floor first",
+      config: BASE_CONFIG,
+      hass: (h) => {
+        h.states["sensor.phone_area"].state = "unknown";
+        h.states["sensor.phone_area"].attributes = { friendly_name: "Phone area" };
+        return h;
+      },
+      check: (card) => firstGroup(card) === "Ground floor" && title(card) === "Away",
+    },
+    {
+      title: "6. Header at the bottom, sorted by name",
+      expect: "Same grouping, position line last, names alphabetical",
+      config: { ...BASE_CONFIG, sort: "name", header: { position: "bottom", allow_manual: true } },
+      hass: (h) => h,
+      check: (card) => {
+        const names = groupEntities(card, 0);
+        return names.join() === [...names].sort().join() ? true : "order: " + names.join(" ");
+      },
+    },
+    {
+      title: "7. Room said by hand, chips open",
+      hero: "Room said by hand",
+      expect: "Bedroom first even though the sensors say living room",
+      config: BASE_CONFIG,
+      hass: (h) => h,
+      manual: "bedroom",
+      openChips: true,
+      check: (card) => firstGroup(card) === "Bedroom",
+    },
+    {
+      title: "8. No grouping, position hidden",
+      expect: "One flat list, no headings, no position line",
+      config: { ...BASE_CONFIG, grouping: "none", header: { position: "hidden" } },
+      hass: (h) => h,
+      check: (card) =>
+        card.shadowRoot.querySelectorAll(".caption").length === 0 &&
+        card.shadowRoot.querySelector(".where").style.display === "none",
+    },
+  ];
+
+  /* ---- helpers that read what the card drew ----------------------------- */
+  const title = (card) => card.shadowRoot.querySelector(".line1").textContent;
+  const note = (card) => card.shadowRoot.querySelector(".line2").textContent;
+  const firstGroup = (card) => {
+    const cap = card.shadowRoot.querySelector(".caption");
+    return cap ? cap.textContent : null;
+  };
+  const groupEntities = (card, i) =>
+    [...card.shadowRoot.querySelectorAll(".group")[i].querySelectorAll("hui-card")]
+      .map((el) => el._c.entity);
+
+  const results = [];
+
+  /* ?hero=1 draws a few cases side by side without the test scaffolding, for
+     the picture in the README. It is still the offline preview: the cards
+     inside are stand-ins, not real Home Assistant cards. */
+  const HERO = new URLSearchParams(location.search).has("hero");
+  const SHOWN = HERO ? [0, 2, 6] : CASES.map((_, i) => i);
+
+  for (const [i, c] of CASES.entries()) {
+    const box = document.createElement("div");
+    box.className = "case";
+    box.innerHTML = HERO
+      ? `<h3>${c.hero || c.title.replace(/^\d+\.\s*/, "")}</h3>`
+      : `<h3>${c.title}</h3><p class="expect">${c.expect}</p>`;
+    box.style.display = SHOWN.includes(i) ? "" : "none";
+    document.body.appendChild(box);
+
+    const card = document.createElement("nearby-card");
+    card.setConfig(c.config);
+    box.appendChild(card);
+    if (c.manual) card._manual = { area: c.manual, until: Date.now() + 20 * 60000 };
+    card.hass = c.hass(baseHass());
+    if (c.openChips) card.shadowRoot.querySelector(".pick").click();
+
+    const got = c.check(card);
+    const v = document.createElement("p");
+    v.className = "verdict " + (got === true ? "ok" : "ko");
+    v.textContent = got === true ? "PASS" : "FAIL — " + (got || "see above");
+    if (HERO) v.style.display = "none";
+    box.appendChild(v);
+    results.push((got === true ? "PASS" : "FAIL") + "  " + c.title +
+                 (got === true ? "" : "  (" + got + ")"));
+  }
+
+  /* Put the verdicts where a headless run can read them without a screenshot:
+     `chrome --headless --dump-dom | grep -A20 RESULTS` */
+  const summary = document.createElement("pre");
+  summary.id = "results";
+  summary.style.cssText = "width:100%;font:12px/1.5 ui-monospace,monospace;color:#333";
+  if (HERO) summary.style.display = "none";
+  summary.textContent = "RESULTS\n" + results.join("\n") +
+    `\n${results.filter((r) => r.startsWith("PASS")).length}/${results.length} passed`;
+  document.body.appendChild(summary);
+  document.title = `Nearby Card — ${results.filter((r) => r.startsWith("PASS")).length}/${results.length} passed`;
+</script>
+</body>
+</html>

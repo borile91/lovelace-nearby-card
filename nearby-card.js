@@ -1,0 +1,969 @@
+/*
+ * Nearby Card — a Lovelace container that puts the cards for the room you are
+ * in at the top of the stack.
+ *
+ * You give it cards, the way you would give them to vertical-stack. It reads
+ * the entity out of each one, asks Home Assistant's registry which area that
+ * entity belongs to, and reorders the stack so the current room comes first,
+ * then the rest of the floor, then everything else.
+ *
+ * Two kinds of presence source, because one is rarely enough:
+ *
+ *   - AREA SENSOR — a single entity that reports which area you are in, such
+ *     as Bermuda BLE Trilateration, ESPresense, or your own template sensor.
+ *     Cheap: one sensor covers the whole house. Vague: it reports the area of
+ *     the nearest receiver, which is not the room you are standing in when
+ *     that room has no receiver. That is what `max_distance` is for — past
+ *     that distance the room is dropped and only the floor is kept, because a
+ *     wide answer that is true beats a precise one that is wrong.
+ *
+ *   - PER-AREA SENSORS — one binary sensor per room (mmWave, PIR, a plug that
+ *     draws current, anything). Exact, but only for the rooms you cover. When
+ *     several are on, the most recently triggered one wins: you were somewhere
+ *     a minute ago, you are here now.
+ *
+ * `presence.priority` decides which source is asked first. Rooms neither
+ * source can see stay unreachable — no amount of software invents a receiver
+ * that is not there — so the header lets you say where you are by hand, for a
+ * configurable number of minutes, after which it goes back to automatic.
+ *
+ * A card's area normally comes from its entity. Two escape hatches:
+ * `nearby_area` on the card pins it to an area, and the `nearby` table lends a
+ * card to another area — a window registered in the living room can sit right
+ * next to the bathroom door, and from in there you want it within reach.
+ *
+ * https://github.com/borile91/lovelace-nearby-card
+ * MIT — Copyright (c) 2026 Giacomo Borile
+ */
+
+(() => {
+  "use strict";
+
+  const CARD_TYPE = "nearby-card";
+  const EDITOR_TAG = "nearby-card-editor";
+  const VERSION = "1.0.0";
+
+  const UNKNOWN = ["unknown", "unavailable", "none", "not_home", ""];
+
+  const DEFAULT_LABELS = {
+    here: "Here",
+    rest_of_floor: "Rest of {floor}",
+    elsewhere: "Elsewhere",
+    no_floor: "Unassigned",
+    away: "Away",
+    away_note: "not reordering: listed by floor",
+    at_home: "At home",
+    in_room: "In {area}",
+    on_floor: "On {floor}",
+    room_unclear: "Room unclear: nearest receiver is {distance} away, in {area}",
+    manual: "set by hand · back to automatic in {minutes} min",
+    automatic: "Automatic",
+    pick_room: "Say which room you are in",
+    empty: "No cards yet. Add some in the editor.",
+  };
+
+  const DEFAULTS = {
+    cards: [],
+    presence: {
+      /* area_sensor: { entity, area_attribute, floor_attribute,
+                        distance_entity, max_distance } */
+      area_sensor: null,
+      /* area_sensors: [{ area, entity, state }] */
+      area_sensors: [],
+      priority: ["area_sensors", "area_sensor"],
+      manual_minutes: 20,
+    },
+    /* cards that count as "here" on top of the ones whose area matches:
+       [{ area: <area_id>, entities: [<entity_id>, ...] }] */
+    nearby: [],
+    grouping: "area_floor_rest",   /* area_floor_rest | area_rest | none */
+    sort: "config",                /* config | name */
+    header: {
+      position: "top",             /* top | bottom | hidden */
+      allow_manual: true,
+    },
+    labels: {},
+  };
+
+  const fill = (tpl, vars) =>
+    String(tpl).replace(/\{(\w+)\}/g, (_, k) => (vars[k] != null ? vars[k] : `{${k}}`));
+
+  const isUnknown = (v) => v == null || UNKNOWN.includes(String(v).toLowerCase());
+
+  /* Deep merge of plain objects, so a partial `presence:` block in YAML keeps
+     the defaults it does not mention. */
+  const merge = (base, over) => {
+    if (!over || typeof over !== "object" || Array.isArray(over)) {
+      return over === undefined ? base : over;
+    }
+    const out = { ...base };
+    for (const [k, v] of Object.entries(over)) {
+      out[k] = k in base && base[k] && typeof base[k] === "object" && !Array.isArray(base[k])
+        ? merge(base[k], v)
+        : v;
+    }
+    return out;
+  };
+
+  /* First entity id mentioned anywhere in a card config. Covers `entity`,
+     `entities: [...]` in all its shapes, and nested cards, so a stack or a
+     mushroom template row still resolves to something. */
+  const firstEntity = (conf, depth = 0) => {
+    if (!conf || typeof conf !== "object" || depth > 4) return null;
+    if (typeof conf.entity === "string" && conf.entity.includes(".")) return conf.entity;
+    for (const key of ["entities", "cards", "features", "sections", "badges"]) {
+      const list = conf[key];
+      if (!Array.isArray(list)) continue;
+      for (const item of list) {
+        if (typeof item === "string" && item.includes(".")) return item;
+        const found = firstEntity(item, depth + 1);
+        if (found) return found;
+      }
+    }
+    for (const key of ["card", "chip", "row"]) {
+      const found = firstEntity(conf[key], depth + 1);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  const CSS = `
+    :host { display: block; }
+    ha-card { padding: 8px 10px 10px; }
+
+    .where { display:flex; align-items:center; gap:10px; padding:4px 2px 8px; }
+    .where.bottom { padding:10px 2px 2px; }
+    .where ha-icon { --mdc-icon-size:26px; color:var(--primary-color); flex:none; }
+    .where .text { min-width:0; flex:1; }
+    .where .line1 { font-size:15px; font-weight:500; color:var(--primary-text-color);
+                    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .where .line2 { font-size:12px; color:var(--secondary-text-color); margin-top:1px;
+                    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .where.out ha-icon { color:var(--secondary-text-color); }
+    .where .pick { flex:none; border:none; background:transparent; cursor:pointer;
+                   padding:4px; border-radius:9px; line-height:0;
+                   color:var(--secondary-text-color); }
+    .where .pick ha-icon { --mdc-icon-size:20px; color:inherit; }
+    .where .pick:hover { background:rgba(127,127,127,.18); }
+    .where .pick.open { color:var(--primary-color); background:rgba(127,127,127,.14); }
+
+    .rooms { display:none; flex-wrap:wrap; gap:5px; padding:0 0 8px; }
+    .rooms.open { display:flex; }
+    .rooms button { border:none; border-radius:13px; padding:5px 10px; font-size:12.5px;
+                    cursor:pointer; color:var(--secondary-text-color);
+                    background:var(--secondary-background-color, rgba(127,127,127,.14)); }
+    .rooms button.on { background:var(--primary-color); color:var(--text-primary-color,#fff); }
+
+    .group { margin-top:8px; }
+    .group:first-child { margin-top:0; }
+    .caption { font-size:12.5px; font-weight:600; letter-spacing:.04em;
+               text-transform:uppercase; color:var(--secondary-text-color);
+               margin:0 2px 4px; overflow:hidden; text-overflow:ellipsis;
+               white-space:nowrap; }
+    .caption.here { color:var(--primary-color); }
+    .stack { display:flex; flex-direction:column; gap:6px; }
+
+    .empty { font-size:13px; color:var(--secondary-text-color); padding:8px 2px; }
+  `;
+
+  class NearbyCard extends HTMLElement {
+    constructor() {
+      super();
+      this.attachShadow({ mode: "open" });
+      this._hass = null;
+      this._built = false;
+      this._children = new Map();   /* index in config.cards -> <hui-card> */
+      this._layout = "";            /* signature of the current order */
+      this._watched = "";
+      this._manual = null;          /* { area, until } */
+      this._preview = false;
+    }
+
+    static getConfigElement() { return document.createElement(EDITOR_TAG); }
+
+    static getStubConfig(hass, entities) {
+      const first = (entities || []).slice(0, 3);
+      return { cards: first.map((entity) => ({ type: "tile", entity })) };
+    }
+
+    setConfig(config) {
+      if (!config || !Array.isArray(config.cards)) {
+        throw new Error("nearby-card: `cards` must be a list of cards");
+      }
+      this._config = merge(DEFAULTS, config);
+      this._labels = { ...DEFAULT_LABELS, ...(this._config.labels || {}) };
+      /* the lent-card table is a list in YAML, because that is what the UI
+         editor can build; inside it is handier as area -> Set of entities */
+      this._lent = new Map();
+      for (const row of this._config.nearby || []) {
+        if (!row || !row.area) continue;
+        const list = Array.isArray(row.entities) ? row.entities
+          : row.entities ? [row.entities] : [];
+        this._lent.set(row.area, new Set(list));
+      }
+      this._children.clear();
+      this._layout = "";
+      if (this._built) this.shadowRoot.querySelector(".body").replaceChildren();
+    }
+
+    set preview(v) {
+      this._preview = v;
+      for (const el of this._children.values()) el.preview = v;
+    }
+    get preview() { return this._preview; }
+
+    /* Kept for masonry views; 1 unit is 50px. */
+    async getCardSize() {
+      let total = 1;
+      for (const el of this._children.values()) {
+        total += (typeof el.getCardSize === "function" ? await el.getCardSize() : 1) || 1;
+      }
+      return total;
+    }
+
+    getGridOptions() { return { columns: 12, rows: "auto", min_columns: 6 }; }
+
+    set hass(hass) {
+      const first = !this._hass;
+      this._hass = hass;
+      if (!this._built) this._build();
+      for (const el of this._children.values()) el.hass = hass;
+
+      const watched = this._signature();
+      if (!first && watched === this._watched) return;
+      this._watched = watched;
+      this._render();
+    }
+
+    /* Only the things that can change the ORDER. The hass setter fires for
+       every entity in the house, and the child cards redraw themselves. */
+    _signature() {
+      const p = this._config.presence;
+      const bits = [];
+      const add = (id) => {
+        const s = id && this._hass.states[id];
+        bits.push(`${id}=${s ? s.state : "-"}${s && s.last_changed ? "@" + s.last_changed : ""}`);
+      };
+      if (p.area_sensor && p.area_sensor.entity) {
+        const s = this._hass.states[p.area_sensor.entity];
+        const attrs = p.area_sensor;
+        bits.push(`${p.area_sensor.entity}=${s ? s.state : "-"}`);
+        if (s) {
+          bits.push(String(s.attributes[attrs.area_attribute || "area_id"]));
+          bits.push(String(s.attributes[attrs.floor_attribute || "floor_id"]));
+        }
+        if (p.area_sensor.distance_entity) add(p.area_sensor.distance_entity);
+      }
+      for (const s of p.area_sensors || []) add(s.entity);
+      return bits.join("|");
+    }
+
+    _build() {
+      this.shadowRoot.innerHTML = `<ha-card>
+          <div class="where">
+            <ha-icon></ha-icon>
+            <div class="text"><div class="line1"></div><div class="line2"></div></div>
+            <button class="pick" title="${DEFAULT_LABELS.pick_room}">
+              <ha-icon icon="mdi:crosshairs-gps"></ha-icon></button>
+          </div>
+          <div class="rooms"></div>
+          <div class="body"></div>
+        </ha-card><style>${CSS}</style>`;
+      this.shadowRoot.querySelector(".pick").addEventListener("click", () => {
+        const rooms = this.shadowRoot.querySelector(".rooms");
+        const open = !rooms.classList.contains("open");
+        rooms.classList.toggle("open", open);
+        this.shadowRoot.querySelector(".pick").classList.toggle("open", open);
+        if (open) this._renderRooms();
+      });
+      this._built = true;
+    }
+
+    /* ---- registry lookups ------------------------------------------- */
+    _areaOfEntity(entityId) {
+      const h = this._hass;
+      const e = h.entities && h.entities[entityId];
+      if (!e) return null;
+      if (e.area_id) return e.area_id;
+      const d = e.device_id && h.devices && h.devices[e.device_id];
+      return d ? d.area_id || null : null;
+    }
+    _areaName(areaId) {
+      const a = this._hass.areas && this._hass.areas[areaId];
+      return a ? a.name : areaId;
+    }
+    _floorOfArea(areaId) {
+      const a = this._hass.areas && this._hass.areas[areaId];
+      return a ? a.floor_id || null : null;
+    }
+    _floorName(floorId) {
+      const f = this._hass.floors && this._hass.floors[floorId];
+      return f ? f.name : floorId;
+    }
+    _floorLevel(floorId) {
+      const f = this._hass.floors && this._hass.floors[floorId];
+      return f && f.level != null ? f.level : 99;
+    }
+
+    /* ---- where am I -------------------------------------------------- */
+    _presence() {
+      const L = this._labels;
+
+      if (this._manual && this._manual.until > Date.now()) {
+        const left = Math.max(1, Math.round((this._manual.until - Date.now()) / 60000));
+        return {
+          home: true, manual: true, icon: "mdi:gesture-tap",
+          area: this._manual.area, floor: this._floorOfArea(this._manual.area),
+          title: fill(L.in_room, { area: this._areaName(this._manual.area) }),
+          note: fill(L.manual, { minutes: left }),
+        };
+      }
+
+      for (const source of this._config.presence.priority) {
+        const got = source === "area_sensors" ? this._fromRoomSensors() : this._fromAreaSensor();
+        if (got) return got;
+      }
+      return {
+        home: false, icon: "mdi:home-export-outline", area: null, floor: null,
+        title: L.away, note: L.away_note,
+      };
+    }
+
+    /* Per-room binary sensors. Several on at once means you walked through:
+       the most recently triggered one is where you are now. */
+    _fromRoomSensors() {
+      const list = this._config.presence.area_sensors || [];
+      let best = null;
+      for (const item of list) {
+        if (!item || !item.entity || !item.area) continue;
+        const s = this._hass.states[item.entity];
+        if (!s) continue;
+        const wanted = item.state || "on";
+        if (String(s.state).toLowerCase() !== String(wanted).toLowerCase()) continue;
+        const when = Date.parse(s.last_changed || 0) || 0;
+        if (!best || when > best.when) best = { area: item.area, when, entity: item.entity };
+      }
+      if (!best) return null;
+      const L = this._labels;
+      return {
+        home: true, icon: "mdi:motion-sensor",
+        area: best.area, floor: this._floorOfArea(best.area),
+        title: fill(L.in_room, { area: this._areaName(best.area) }),
+        note: this._hass.states[best.entity].attributes.friendly_name || best.entity,
+      };
+    }
+
+    /* Single sensor that reports an area (Bermuda, ESPresense, template). */
+    _fromAreaSensor() {
+      const cfg = this._config.presence.area_sensor;
+      if (!cfg || !cfg.entity) return null;
+      const s = this._hass.states[cfg.entity];
+      if (!s || isUnknown(s.state)) return null;
+
+      const L = this._labels;
+      const areaAttr = cfg.area_attribute || "area_id";
+      const floorAttr = cfg.floor_attribute || "floor_id";
+      let area = s.attributes[areaAttr] || null;
+      let floor = s.attributes[floorAttr] || null;
+
+      /* Sensors that put the area in the state instead of an attribute: match
+         it against the registry, by id and by name. */
+      if (!area) {
+        const wanted = String(s.state).toLowerCase();
+        for (const [id, a] of Object.entries(this._hass.areas || {})) {
+          if (id.toLowerCase() === wanted || String(a.name).toLowerCase() === wanted) {
+            area = id;
+            break;
+          }
+        }
+      }
+      if (!floor && area) floor = this._floorOfArea(area);
+      if (!area && !floor) return null;
+
+      const source = s.attributes.friendly_name || cfg.entity;
+      const dEnt = cfg.distance_entity && this._hass.states[cfg.distance_entity];
+      const distance = dEnt && !isUnknown(dEnt.state) ? Number(dEnt.state) : null;
+      const unit = (dEnt && dEnt.attributes.unit_of_measurement) || "m";
+      const tooFar = cfg.max_distance != null && distance != null &&
+        isFinite(distance) && distance > Number(cfg.max_distance);
+
+      if (tooFar) {
+        return {
+          home: true, icon: "mdi:map-marker-question", area: null, floor,
+          title: floor ? fill(L.on_floor, { floor: this._floorName(floor) }) : L.at_home,
+          note: fill(L.room_unclear, {
+            distance: `${distance} ${unit}`,
+            area: area ? this._areaName(area) : s.state,
+          }),
+        };
+      }
+      return {
+        home: true, icon: "mdi:map-marker-account", area, floor,
+        title: area ? fill(L.in_room, { area: this._areaName(area) })
+                    : fill(L.on_floor, { floor: this._floorName(floor) }),
+        note: distance != null && isFinite(distance)
+          ? `${source} · ${distance} ${unit}` : source,
+      };
+    }
+
+    /* ---- grouping ---------------------------------------------------- */
+    _items() {
+      const cards = this._config.cards || [];
+      const items = cards.map((conf, index) => {
+        const entity = firstEntity(conf);
+        const area = conf.nearby_area || (entity ? this._areaOfEntity(entity) : null);
+        const state = entity && this._hass.states[entity];
+        return {
+          index, conf, entity, area,
+          floor: area ? this._floorOfArea(area) : null,
+          name: conf.name || (state && state.attributes.friendly_name) || entity || "",
+        };
+      });
+      if (this._config.sort === "name") {
+        items.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+      }
+      return items;
+    }
+
+    _groups(where, items) {
+      const L = this._labels;
+      if (this._config.grouping === "none" || (!where.area && !where.floor)) {
+        if (this._config.grouping === "none") return [{ key: "all", cards: items }];
+        return this._byFloor(items);
+      }
+
+      const lent = (where.area && this._lent.get(where.area)) || new Set();
+      const here = [], floor = [], rest = [];
+      for (const it of items) {
+        if (where.area && (it.area === where.area || lent.has(it.entity))) here.push(it);
+        else if (where.floor && it.floor === where.floor &&
+                 this._config.grouping === "area_floor_rest") floor.push(it);
+        else rest.push(it);
+      }
+
+      const out = [];
+      if (here.length) {
+        out.push({ key: "here", here: true, title: this._areaName(where.area) || L.here, cards: here });
+      }
+      if (floor.length) {
+        out.push({
+          key: "floor",
+          title: here.length
+            ? fill(L.rest_of_floor, { floor: this._floorName(where.floor) })
+            : this._floorName(where.floor),
+          cards: floor,
+        });
+      }
+      if (rest.length) {
+        out.push({ key: "rest", title: out.length ? L.elsewhere : null, cards: rest });
+      }
+      return out;
+    }
+
+    /* Away, or nothing known: group by floor, bottom one first. */
+    _byFloor(items) {
+      const perFloor = new Map();
+      for (const it of items) {
+        const k = it.floor || "_";
+        if (!perFloor.has(k)) perFloor.set(k, []);
+        perFloor.get(k).push(it);
+      }
+      if (perFloor.size < 2) return [{ key: "all", cards: items }];
+      return [...perFloor.keys()]
+        .sort((a, b) => this._floorLevel(a) - this._floorLevel(b))
+        .map((k) => ({
+          key: `floor_${k}`,
+          title: k === "_" ? this._labels.no_floor : this._floorName(k),
+          cards: perFloor.get(k),
+        }));
+    }
+
+    /* ---- drawing ------------------------------------------------------ */
+    _render() {
+      const where = this._presence();
+      const groups = this._groups(where, this._items());
+      this._header(where);
+
+      const layout = groups.map((g) => `${g.key}:${g.cards.map((c) => c.index).join(",")}`).join("|");
+      if (layout !== this._layout) {
+        this._layout = layout;
+        this._drawGroups(groups);
+      }
+
+      clearTimeout(this._alarm);
+      if (this._manual && this._manual.until > Date.now()) {
+        this._alarm = setTimeout(() => {
+          this._watched = ""; this._layout = ""; this._render();
+        }, this._manual.until - Date.now() + 500);
+      }
+    }
+
+    _header(where) {
+      const r = this.shadowRoot;
+      const box = r.querySelector(".where");
+      const pos = this._config.header.position;
+      const hidden = pos === "hidden";
+      box.style.display = hidden ? "none" : "";
+      r.querySelector(".rooms").style.display = hidden ? "none" : "";
+      if (hidden) return;
+
+      box.classList.toggle("out", !where.home);
+      box.classList.toggle("bottom", pos === "bottom");
+      box.querySelector("ha-icon").setAttribute("icon", where.icon);
+      box.querySelector(".line1").textContent = where.title;
+      box.querySelector(".line2").textContent = where.note;
+      box.querySelector(".pick").style.display = this._config.header.allow_manual ? "" : "none";
+      if (r.querySelector(".rooms").classList.contains("open")) this._renderRooms();
+
+      /* header at the bottom: the same nodes, moved after the body */
+      const card = r.querySelector("ha-card");
+      const body = r.querySelector(".body");
+      const rooms = r.querySelector(".rooms");
+      const wantBottom = pos === "bottom";
+      const isBottom = card.firstElementChild === body;
+      if (wantBottom !== isBottom) {
+        if (wantBottom) {
+          card.append(box, rooms);
+        } else {
+          card.insertBefore(box, body);
+          card.insertBefore(rooms, body);
+        }
+      }
+    }
+
+    /* Rooms to choose from: every area used by a card, plus the ones that only
+       lend cards to others. */
+    _renderRooms() {
+      const box = this.shadowRoot.querySelector(".rooms");
+      const areas = new Set(this._items().map((i) => i.area).filter(Boolean));
+      for (const a of this._lent.keys()) areas.add(a);
+
+      const ordered = [...areas].sort((a, b) =>
+        this._floorLevel(this._floorOfArea(a)) - this._floorLevel(this._floorOfArea(b)) ||
+        String(this._areaName(a)).localeCompare(String(this._areaName(b))));
+
+      const active = this._manual && this._manual.until > Date.now() ? this._manual.area : null;
+      box.replaceChildren();
+      const chip = (text, area) => {
+        const b = document.createElement("button");
+        b.textContent = text;
+        b.classList.toggle("on", area === active);
+        b.addEventListener("click", () => {
+          this._manual = area
+            ? { area, until: Date.now() + this._config.presence.manual_minutes * 60000 }
+            : null;
+          box.classList.remove("open");
+          this.shadowRoot.querySelector(".pick").classList.remove("open");
+          this._watched = ""; this._layout = "";
+          this._render();
+        });
+        box.appendChild(b);
+      };
+      chip(this._labels.automatic, null);
+      for (const a of ordered) chip(this._areaName(a), a);
+    }
+
+    _drawGroups(groups) {
+      const body = this.shadowRoot.querySelector(".body");
+      body.replaceChildren();
+      if (!groups.length || !groups.some((g) => g.cards.length)) {
+        const p = document.createElement("div");
+        p.className = "empty";
+        p.textContent = this._labels.empty;
+        body.appendChild(p);
+        return;
+      }
+      for (const g of groups) {
+        const div = document.createElement("div");
+        div.className = "group";
+        if (g.title) {
+          const cap = document.createElement("div");
+          cap.className = "caption" + (g.here ? " here" : "");
+          cap.textContent = g.title;
+          div.appendChild(cap);
+        }
+        const stack = document.createElement("div");
+        stack.className = "stack";
+        for (const item of g.cards) stack.appendChild(this._child(item));
+        div.appendChild(stack);
+        body.appendChild(div);
+      }
+    }
+
+    /* One <hui-card> per configured card, created once and moved around as the
+       order changes: rebuilding them on every move would restart animations
+       and drop anything the user is holding, like a slider. */
+    _child(item) {
+      let el = this._children.get(item.index);
+      if (!el) {
+        el = document.createElement("hui-card");
+        const conf = { ...item.conf };
+        delete conf.nearby_area;      /* ours, not the child's */
+        el.config = conf;
+        el.hass = this._hass;
+        el.preview = this._preview;
+        /* hui-card is lazy-loaded: if it has not been defined yet the element
+           upgrades later, and load() only exists from that moment on */
+        if (typeof el.load === "function") el.load();
+        else customElements.whenDefined("hui-card").then(() => el.load && el.load());
+        this._children.set(item.index, el);
+      }
+      return el;
+    }
+  }
+
+  /* ==================================================================== */
+
+  const FORM_SCHEMA = () => [
+    {
+      name: "presence", type: "expandable", flatten: true, expanded: true,
+      icon: "mdi:map-marker-account", title: "Presence",
+      schema: [
+        {
+          name: "area_sensor", type: "expandable", flatten: false,
+          icon: "mdi:bluetooth", title: "Area sensor (Bermuda, ESPresense, template)",
+          schema: [
+            { name: "entity", selector: { entity: {} } },
+            {
+              type: "grid", name: "", schema: [
+                { name: "area_attribute", selector: { text: {} }, default: "area_id" },
+                { name: "floor_attribute", selector: { text: {} }, default: "floor_id" },
+              ],
+            },
+            { name: "distance_entity", selector: { entity: { filter: [{ device_class: "distance" }] } } },
+            { name: "max_distance", selector: { number: { min: 0, max: 50, step: 0.5, mode: "box", unit_of_measurement: "m" } } },
+          ],
+        },
+        {
+          type: "grid", name: "", schema: [
+            { name: "priority", selector: { select: { mode: "dropdown", options: [
+              { value: "area_sensors,area_sensor", label: "Room sensors first" },
+              { value: "area_sensor,area_sensors", label: "Area sensor first" },
+            ] } } },
+            { name: "manual_minutes", selector: { number: { min: 1, max: 240, step: 1, mode: "box", unit_of_measurement: "min" } } },
+          ],
+        },
+        {
+          name: "area_sensors", selector: {
+            object: {
+              multiple: true,
+              label_field: "area",
+              description_field: "entity",
+              fields: {
+                area: { label: "Area", required: true, selector: { area: {} } },
+                entity: { label: "Sensor", required: true, selector: { entity: { filter: [{ domain: "binary_sensor" }, { domain: "sensor" }, { domain: "input_boolean" }] } } },
+                state: { label: "Counts as present when state is", selector: { text: {} } },
+              },
+            },
+          },
+        },
+      ],
+    },
+    {
+      name: "nearby", type: "expandable", flatten: true,
+      icon: "mdi:arrow-expand-horizontal", title: "Cards lent to a nearby room",
+      schema: [
+        {
+          name: "nearby", selector: {
+            object: {
+              multiple: true,
+              label_field: "area",
+              description_field: "entities",
+              fields: {
+                area: { label: "When I am in", required: true, selector: { area: {} } },
+                entities: { label: "Also show these", required: true, selector: { entity: { multiple: true } } },
+              },
+            },
+          },
+        },
+      ],
+    },
+    {
+      name: "layout", type: "expandable", flatten: true, icon: "mdi:view-agenda", title: "Layout",
+      schema: [
+        {
+          type: "grid", name: "", schema: [
+            { name: "grouping", selector: { select: { mode: "dropdown", options: [
+              { value: "area_floor_rest", label: "Room, rest of floor, elsewhere" },
+              { value: "area_rest", label: "Room, everything else" },
+              { value: "none", label: "One list, no headings" },
+            ] } } },
+            { name: "sort", selector: { select: { mode: "dropdown", options: [
+              { value: "config", label: "As configured" },
+              { value: "name", label: "By name" },
+            ] } } },
+            { name: "header_position", selector: { select: { mode: "dropdown", options: [
+              { value: "top", label: "Position on top" },
+              { value: "bottom", label: "Position at the bottom" },
+              { value: "hidden", label: "Hide position" },
+            ] } } },
+            { name: "header_allow_manual", selector: { boolean: {} } },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const FORM_LABELS = {
+    entity: "Entity",
+    area_attribute: "Area attribute",
+    floor_attribute: "Floor attribute",
+    distance_entity: "Distance entity",
+    max_distance: "Drop the room past",
+    priority: "Ask first",
+    manual_minutes: "Manual choice lasts",
+    area_sensors: "Per-room presence sensors",
+    grouping: "Grouping",
+    sort: "Default order",
+    header_position: "Position indicator",
+    header_allow_manual: "Let me set the room by hand",
+  };
+
+  const FORM_HELPERS = {
+    max_distance: "Past this distance from the nearest receiver the room is dropped and only the floor is kept. Leave empty to always trust the room.",
+    area_attribute: "Attribute holding the area id. If the sensor puts the area in its state instead, leave the attribute empty.",
+    area_sensors: "One sensor per room. When several are on, the most recent one wins.",
+    nearby: "A card belongs to the area of its entity. Here you can lend it to another room as well — a window registered in the living room that sits right by the bathroom door.",
+  };
+
+  class NearbyCardEditor extends HTMLElement {
+    constructor() {
+      super();
+      this.attachShadow({ mode: "open" });
+      this._config = { cards: [] };
+      this._selected = 0;
+      this._guiMode = true;
+      this._built = false;
+    }
+
+    setConfig(config) {
+      this._config = { cards: [], ...config };
+      if (this._selected > this._config.cards.length) this._selected = this._config.cards.length;
+      this._render();
+    }
+
+    set hass(hass) { this._hass = hass; this._boot(); this._render(); }
+    set lovelace(lovelace) { this._lovelace = lovelace; this._render(); }
+
+    /* hui-card-element-editor and hui-card-picker are lazy-loaded by the
+       frontend and are not there until some built-in stack editor has been
+       opened at least once. Opening one on the quiet defines both. */
+    async _boot() {
+      if (this._booted) return;
+      this._booted = true;
+      try {
+        if (!customElements.get("hui-card-element-editor")) {
+          const helpers = await window.loadCardHelpers();
+          helpers.createCardElement({ type: "vertical-stack", cards: [] });
+          await customElements.whenDefined("hui-vertical-stack-card");
+          const cls = customElements.get("hui-vertical-stack-card");
+          if (cls && cls.getConfigElement) await cls.getConfigElement();
+          await customElements.whenDefined("hui-card-element-editor");
+        }
+      } catch (err) {
+        /* the editor still works, minus the card picker */
+        console.warn("nearby-card: could not preload the card editor", err);
+      }
+      this._render();
+    }
+
+    _emit(config) {
+      this._config = config;
+      this.dispatchEvent(new CustomEvent("config-changed", {
+        detail: { config }, bubbles: true, composed: true,
+      }));
+      this._render();
+    }
+
+    /* The form holds everything except the cards; the nested shape of the
+       config is flattened here and folded back on the way out, because
+       ha-form works on a flat object. */
+    _formData() {
+      const c = this._config;
+      const p = c.presence || {};
+      return {
+        area_sensor: p.area_sensor || {},
+        area_sensors: p.area_sensors || [],
+        priority: (p.priority || DEFAULTS.presence.priority).join(","),
+        manual_minutes: p.manual_minutes ?? DEFAULTS.presence.manual_minutes,
+        nearby: c.nearby || [],
+        grouping: c.grouping ?? DEFAULTS.grouping,
+        sort: c.sort ?? DEFAULTS.sort,
+        header_position: (c.header && c.header.position) ?? DEFAULTS.header.position,
+        header_allow_manual: (c.header && c.header.allow_manual) ?? DEFAULTS.header.allow_manual,
+      };
+    }
+
+    _fromForm(v) {
+      const out = { ...this._config };
+      const areaSensor = v.area_sensor && v.area_sensor.entity ? v.area_sensor : null;
+      out.presence = {
+        ...(this._config.presence || {}),
+        area_sensor: areaSensor,
+        area_sensors: v.area_sensors && v.area_sensors.length ? v.area_sensors : undefined,
+        priority: v.priority ? v.priority.split(",") : undefined,
+        manual_minutes: v.manual_minutes,
+      };
+      for (const k of Object.keys(out.presence)) {
+        if (out.presence[k] === undefined || out.presence[k] === null) delete out.presence[k];
+      }
+      if (!Object.keys(out.presence).length) delete out.presence;
+      if (v.nearby && v.nearby.length) out.nearby = v.nearby;
+      else delete out.nearby;
+      out.grouping = v.grouping;
+      out.sort = v.sort;
+      out.header = { position: v.header_position, allow_manual: v.header_allow_manual };
+      return out;
+    }
+
+    _render() {
+      if (!this._hass) return;
+      if (!this._built) {
+        this.shadowRoot.innerHTML = `
+          <div class="wrap">
+            <div class="tabs"></div>
+            <div class="slot"></div>
+            <div class="form"></div>
+          </div>
+          <style>
+            .tabs { display:flex; flex-wrap:wrap; gap:4px; align-items:center; margin-bottom:8px; }
+            .tabs button { border:none; border-radius:12px; padding:5px 11px; font-size:13px;
+                           cursor:pointer; color:var(--secondary-text-color);
+                           background:var(--secondary-background-color, rgba(127,127,127,.14)); }
+            .tabs button.on { background:var(--primary-color); color:var(--text-primary-color,#fff); }
+            .toolbar { display:flex; gap:4px; margin:6px 0; }
+            .toolbar ha-icon-button { --mdc-icon-button-size:36px; }
+            .slot { margin-bottom:12px; }
+            .hint { font-size:12px; color:var(--secondary-text-color); margin:4px 2px 10px; }
+          </style>`;
+        this._built = true;
+      }
+      this._renderTabs();
+      this._renderSlot();
+      this._renderForm();
+    }
+
+    _renderTabs() {
+      const tabs = this.shadowRoot.querySelector(".tabs");
+      tabs.replaceChildren();
+      const n = this._config.cards.length;
+      for (let i = 0; i < n; i++) {
+        const b = document.createElement("button");
+        b.textContent = String(i + 1);
+        b.classList.toggle("on", i === this._selected);
+        b.addEventListener("click", () => { this._selected = i; this._render(); });
+        tabs.appendChild(b);
+      }
+      const plus = document.createElement("button");
+      plus.textContent = "+";
+      plus.title = "Add card";
+      plus.classList.toggle("on", this._selected === n);
+      plus.addEventListener("click", () => { this._selected = n; this._render(); });
+      tabs.appendChild(plus);
+    }
+
+    _renderSlot() {
+      const slot = this.shadowRoot.querySelector(".slot");
+      slot.replaceChildren();
+      const n = this._config.cards.length;
+
+      if (this._selected >= n) {
+        const picker = document.createElement("hui-card-picker");
+        picker.hass = this._hass;
+        picker.lovelace = this._lovelace;
+        picker.addEventListener("config-changed", (ev) => {
+          ev.stopPropagation();
+          const cards = [...this._config.cards, ev.detail.config];
+          this._selected = cards.length - 1;
+          this._emit({ ...this._config, cards });
+        });
+        slot.appendChild(picker);
+        return;
+      }
+
+      const bar = document.createElement("div");
+      bar.className = "toolbar";
+      const tool = (icon, title, fn) => {
+        const b = document.createElement("ha-icon-button");
+        b.title = title;
+        b.innerHTML = `<ha-icon icon="${icon}"></ha-icon>`;
+        b.addEventListener("click", fn);
+        bar.appendChild(b);
+      };
+      const move = (delta) => {
+        const cards = [...this._config.cards];
+        const to = this._selected + delta;
+        if (to < 0 || to >= cards.length) return;
+        [cards[this._selected], cards[to]] = [cards[to], cards[this._selected]];
+        this._selected = to;
+        this._emit({ ...this._config, cards });
+      };
+      tool("mdi:arrow-up", "Move up", () => move(-1));
+      tool("mdi:arrow-down", "Move down", () => move(1));
+      tool("mdi:delete", "Remove", () => {
+        const cards = this._config.cards.filter((_, i) => i !== this._selected);
+        this._selected = Math.max(0, this._selected - 1);
+        this._emit({ ...this._config, cards });
+      });
+      slot.appendChild(bar);
+
+      const ed = document.createElement("hui-card-element-editor");
+      ed.hass = this._hass;
+      ed.lovelace = this._lovelace;
+      ed.value = this._config.cards[this._selected];
+      ed.addEventListener("config-changed", (ev) => {
+        ev.stopPropagation();
+        const cards = [...this._config.cards];
+        cards[this._selected] = ev.detail.config;
+        this._emit({ ...this._config, cards });
+      });
+      ed.addEventListener("GUImode-changed", (ev) => {
+        ev.stopPropagation();
+        this._guiMode = ev.detail.guiMode;
+      });
+      slot.appendChild(ed);
+
+      const hint = document.createElement("div");
+      hint.className = "hint";
+      hint.textContent =
+        "This card is grouped by the area of its entity. Add `nearby_area: <area id>` to its YAML to pin it to another room.";
+      slot.appendChild(hint);
+    }
+
+    _renderForm() {
+      const box = this.shadowRoot.querySelector(".form");
+      let form = box.querySelector("ha-form");
+      if (!form) {
+        form = document.createElement("ha-form");
+        form.computeLabel = (s) => FORM_LABELS[s.name] || undefined;
+        form.computeHelper = (s) => FORM_HELPERS[s.name] || undefined;
+        form.addEventListener("value-changed", (ev) => {
+          ev.stopPropagation();
+          this._emit(this._fromForm(ev.detail.value));
+        });
+        box.appendChild(form);
+      }
+      form.hass = this._hass;
+      form.schema = FORM_SCHEMA();
+      form.data = this._formData();
+    }
+  }
+
+  if (!customElements.get(CARD_TYPE)) customElements.define(CARD_TYPE, NearbyCard);
+  if (!customElements.get(EDITOR_TAG)) customElements.define(EDITOR_TAG, NearbyCardEditor);
+
+  window.customCards = window.customCards || [];
+  window.customCards.push({
+    type: CARD_TYPE,
+    name: "Nearby Card",
+    description: "A container that moves the cards for the room you are in to the top.",
+    preview: false,
+    documentationURL: "https://github.com/borile91/lovelace-nearby-card",
+  });
+
+  console.info(
+    `%c NEARBY-CARD %c ${VERSION} `,
+    "color:#fff;background:#03a9f4;font-weight:700",
+    "color:#03a9f4;background:#fff;font-weight:700"
+  );
+})();

@@ -1,0 +1,7 @@
+{
+  "name": "Nearby Card",
+  "filename": "nearby-card.js",
+  "content_in_root": true,
+  "render_readme": true,
+  "homeassistant": "2024.11.0"
+}
