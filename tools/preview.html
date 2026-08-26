@@ -332,6 +332,26 @@
       },
     },
     {
+      title: "8e. By floor, room you are in first",
+      expect: "Bedroom cards jump to the top of the Upstairs group",
+      config: { ...BASE_CONFIG, grouping: "floor", sort: "nearby" },
+      hass: (h) => {
+        /* upstairs, in the bedroom: the floor decides the group, the room
+           decides the order inside it */
+        h.states["sensor.phone_area"].state = "Bedroom";
+        h.states["sensor.phone_area"].attributes =
+          { friendly_name: "Phone area", area_id: "bedroom", floor_id: "upstairs" };
+        return h;
+      },
+      check: (card) => {
+        const caps = captions(card);
+        if (caps[0] !== "Upstairs") return "first group: " + caps[0];
+        const first = groupEntities(card, 0);
+        return first[0] === "light.bedroom" && first[1] === "cover.bedroom_blind"
+          ? true : "order upstairs: " + first.join(" ");
+      },
+    },
+    {
       title: "8. No grouping, position hidden",
       expect: "One flat list, no headings, no position line",
       config: { ...BASE_CONFIG, grouping: "none", header: { position: "hidden" } },

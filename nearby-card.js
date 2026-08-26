@@ -41,7 +41,7 @@
 
   const CARD_TYPE = "nearby-card";
   const EDITOR_TAG = "nearby-card-editor";
-  const VERSION = "1.3.1";
+  const VERSION = "1.4.0";
 
   const UNKNOWN = ["unknown", "unavailable", "none", "not_home", ""];
 
@@ -77,7 +77,7 @@
        [{ area: <area_id>, entities: [<entity_id>, ...] }] */
     nearby: [],
     grouping: "area_floor_rest",   /* area_floor_rest | area_rest | floor | none */
-    sort: "config",                /* config | name */
+    sort: "config",                /* config | name | nearby */
     group_icons: false,            /* draw the area/floor icon beside the heading */
     header: {
       position: "top",             /* top | bottom | hidden */
@@ -528,9 +528,21 @@
     }
 
     /* ---- drawing ------------------------------------------------------ */
+    /* `sort: nearby` works inside a group, not across groups: the grouping
+       already decides what comes first. It matters when the groups are floors
+       — you are on a floor, but you are IN a room, and that is the thing worth
+       spending. Stable sort, so everything else keeps the order you gave it. */
+    _roomFirst(cards, where) {
+      if (this._config.sort !== "nearby" || !where.area) return cards;
+      const lent = this._lent.get(where.area) || new Set();
+      const here = (t) => t.area === where.area || lent.has(t.entity);
+      return [...cards].sort((a, b) => (here(b) ? 1 : 0) - (here(a) ? 1 : 0));
+    }
+
     _render() {
       const where = this._presence();
-      const groups = this._groups(where, this._items());
+      const groups = this._groups(where, this._items())
+        .map((g) => ({ ...g, cards: this._roomFirst(g.cards, where) }));
       this._header(where);
 
       const layout = groups.map((g) => `${g.key}:${g.cards.map((c) => c.index).join(",")}`).join("|");
@@ -762,6 +774,7 @@
             { name: "sort", selector: { select: { mode: "dropdown", options: [
               { value: "config", label: "As configured" },
               { value: "name", label: "By name" },
+              { value: "nearby", label: "Room you are in first" },
             ] } } },
             { name: "header_position", selector: { select: { mode: "dropdown", options: [
               { value: "top", label: "Position on top" },

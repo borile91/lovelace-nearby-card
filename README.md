@@ -153,7 +153,7 @@ cards:
 | `presence.manual_minutes` | `20` | How long a room picked by hand lasts. |
 | `nearby` | `[]` | Cards lent to another room: `area`, `entities`. |
 | `grouping` | `area_floor_rest` | See below. |
-| `sort` | `config` | `config` keeps your order, `name` sorts alphabetically inside each group. |
+| `sort` | `config` | Order inside each group: see below. |
 | `group_icons` | `false` | Draw the area or floor icon beside each heading. |
 | `header.position` | `top` | `top`, `bottom`, or `hidden`. |
 | `header.allow_manual` | `true` | Show the crosshair button. |
@@ -171,6 +171,18 @@ cards:
 `floor` is the one to pick when the house is more vertical than it is wide, or when presence is only good enough to tell the floors apart — which is often the case with a single area sensor and few receivers. Floors come in the order they are stacked (their `level` in Home Assistant), except the one you are on, which jumps to the top and is drawn as a title rather than a subtitle. Cards whose area has no floor land in a group of their own, named by the `no_floor` label.
 
 When nothing knows where you are, any grouping other than `none` falls back to `floor`.
+
+### Order inside a group
+
+| `sort` | Order |
+| --- | --- |
+| `config` *(default)* | The order you put the cards in |
+| `name` | Alphabetical |
+| `nearby` | The room you are in first, then the order you gave |
+
+`nearby` is worth having with `grouping: floor`. Grouping by floor already knows which floor you are on, but you are not on a floor — you are *in a room*, and that is the finer thing your presence sensors are telling you. Without it the first card of your floor is simply the first one in the list, which is how you end up looking at the study while standing in the bedroom.
+
+It sorts *inside* each group and never across groups: the grouping decides what comes first, this decides what comes first within it. Cards lent to the room by `nearby` rise with it.
 
 Headings are Home Assistant's own **heading card**, not something drawn here to look like one — the group you are in gets the `title` style, the others `subtitle`. So they match the headings already sitting in your dashboard, and they keep matching when Home Assistant changes them.
 
