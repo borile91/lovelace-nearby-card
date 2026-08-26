@@ -41,7 +41,7 @@
 
   const CARD_TYPE = "nearby-card";
   const EDITOR_TAG = "nearby-card-editor";
-  const VERSION = "1.2.0";
+  const VERSION = "1.3.0";
 
   const UNKNOWN = ["unknown", "unavailable", "none", "not_home", ""];
 
@@ -130,10 +130,14 @@
 
   const CSS = `
     :host { display: block; }
-    ha-card { padding: 8px 10px 10px; }
+    /* No ha-card on purpose. This is a container, and a container that draws
+       its own background turns a stack of cards into a box with cards in it —
+       which is not what the rest of a dashboard looks like. The children keep
+       their own backgrounds; between them there is nothing. */
+    .root { display:flex; flex-direction:column; }
 
-    .where { display:flex; align-items:center; gap:10px; padding:4px 2px 8px; }
-    .where.bottom { padding:10px 2px 2px; }
+    .where { display:flex; align-items:center; gap:10px; padding:2px 4px 8px; }
+    .where.bottom { padding:10px 4px 2px; }
     .where ha-icon { --mdc-icon-size:26px; color:var(--primary-color); flex:none; }
     .where .text { min-width:0; flex:1; }
     .where .line1 { font-size:15px; font-weight:500; color:var(--primary-text-color);
@@ -148,26 +152,18 @@
     .where .pick:hover { background:rgba(127,127,127,.18); }
     .where .pick.open { color:var(--primary-color); background:rgba(127,127,127,.14); }
 
-    .rooms { display:none; flex-wrap:wrap; gap:5px; padding:0 0 8px; }
+    .rooms { display:none; flex-wrap:wrap; gap:5px; padding:0 4px 8px; }
     .rooms.open { display:flex; }
     .rooms button { border:none; border-radius:13px; padding:5px 10px; font-size:12.5px;
                     cursor:pointer; color:var(--secondary-text-color);
                     background:var(--secondary-background-color, rgba(127,127,127,.14)); }
     .rooms button.on { background:var(--primary-color); color:var(--text-primary-color,#fff); }
 
-    .group { margin-top:8px; }
-    .group:first-child { margin-top:0; }
-    .caption { display:flex; align-items:center; gap:5px;
-               font-size:12.5px; font-weight:600; letter-spacing:.04em;
-               text-transform:uppercase; color:var(--secondary-text-color);
-               margin:0 2px 4px; }
-    .caption span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .caption ha-icon { --mdc-icon-size:16px; width:16px; height:16px; flex:none;
-                       color:inherit; }
-    .caption.here { color:var(--primary-color); }
-    .stack { display:flex; flex-direction:column; gap:6px; }
+    .group { display:flex; flex-direction:column; }
+    /* same 8px Home Assistant leaves between cards in a section */
+    .stack { display:flex; flex-direction:column; gap:8px; }
 
-    .empty { font-size:13px; color:var(--secondary-text-color); padding:8px 2px; }
+    .empty { font-size:13px; color:var(--secondary-text-color); padding:8px 4px; }
   `;
 
   class NearbyCard extends HTMLElement {
@@ -177,6 +173,7 @@
       this._hass = null;
       this._built = false;
       this._children = new Map();   /* index in config.cards -> <hui-card> */
+      this._headings = [];          /* the heading cards, rebuilt with the groups */
       this._layout = "";            /* signature of the current order */
       this._watched = "";
       this._manual = null;          /* { area, until } */
@@ -213,6 +210,7 @@
     set preview(v) {
       this._preview = v;
       for (const el of this._children.values()) el.preview = v;
+      for (const el of this._headings) el.preview = v;
     }
     get preview() { return this._preview; }
 
@@ -232,6 +230,7 @@
       this._hass = hass;
       if (!this._built) this._build();
       for (const el of this._children.values()) el.hass = hass;
+      for (const el of this._headings) el.hass = hass;
 
       const watched = this._signature();
       if (!first && watched === this._watched) return;
@@ -263,7 +262,7 @@
     }
 
     _build() {
-      this.shadowRoot.innerHTML = `<ha-card>
+      this.shadowRoot.innerHTML = `<div class="root">
           <div class="where">
             <ha-icon></ha-icon>
             <div class="text"><div class="line1"></div><div class="line2"></div></div>
@@ -272,7 +271,7 @@
           </div>
           <div class="rooms"></div>
           <div class="body"></div>
-        </ha-card><style>${CSS}</style>`;
+        </div><style>${CSS}</style>`;
       this.shadowRoot.querySelector(".pick").addEventListener("click", () => {
         const rooms = this.shadowRoot.querySelector(".rooms");
         const open = !rooms.classList.contains("open");
@@ -555,7 +554,7 @@
       if (r.querySelector(".rooms").classList.contains("open")) this._renderRooms();
 
       /* header at the bottom: the same nodes, moved after the body */
-      const card = r.querySelector("ha-card");
+      const card = r.querySelector(".root");
       const body = r.querySelector(".body");
       const rooms = r.querySelector(".rooms");
       const wantBottom = pos === "bottom";
@@ -605,6 +604,7 @@
     _drawGroups(groups) {
       const body = this.shadowRoot.querySelector(".body");
       body.replaceChildren();
+      this._headings = [];
       if (!groups.length || !groups.some((g) => g.cards.length)) {
         const p = document.createElement("div");
         p.className = "empty";
@@ -615,25 +615,33 @@
       for (const g of groups) {
         const div = document.createElement("div");
         div.className = "group";
-        if (g.title) {
-          const cap = document.createElement("div");
-          cap.className = "caption" + (g.here ? " here" : "");
-          if (this._config.group_icons && g.icon) {
-            const icon = document.createElement("ha-icon");
-            icon.setAttribute("icon", g.icon);
-            cap.appendChild(icon);
-          }
-          const text = document.createElement("span");
-          text.textContent = g.title;
-          cap.appendChild(text);
-          div.appendChild(cap);
-        }
+        if (g.title) div.appendChild(this._heading(g));
         const stack = document.createElement("div");
         stack.className = "stack";
         for (const item of g.cards) stack.appendChild(this._child(item));
         div.appendChild(stack);
         body.appendChild(div);
       }
+    }
+
+    /* Group headings are Home Assistant's own heading card, not something
+       drawn here to look like one. A hand-made heading is a heading that
+       drifts: the real one already sits in every dashboard next to this card,
+       and it is what the eye is calibrated on.
+       The group you are in gets the `title` style and the others `subtitle`,
+       which is how the two ranks are told apart in HA — no colour of our own
+       invention. */
+    _heading(g) {
+      const conf = { type: "heading", heading: g.title, heading_style: g.here ? "title" : "subtitle" };
+      if (this._config.group_icons && g.icon) conf.icon = g.icon;
+      const el = document.createElement("hui-card");
+      el.config = conf;
+      el.hass = this._hass;
+      el.preview = this._preview;
+      if (typeof el.load === "function") el.load();
+      else customElements.whenDefined("hui-card").then(() => el.load && el.load());
+      this._headings.push(el);
+      return el;
     }
 
     /* One <hui-card> per configured card, created once and moved around as the
@@ -785,14 +793,11 @@
       super();
       this.attachShadow({ mode: "open" });
       this._config = { cards: [] };
-      this._selected = 0;
-      this._guiMode = true;
       this._built = false;
     }
 
     setConfig(config) {
       this._config = { cards: [], ...config };
-      if (this._selected > this._config.cards.length) this._selected = this._config.cards.length;
       this._sync();
     }
 
@@ -815,27 +820,45 @@
 
     _children() {
       if (!this._built) return [];
-      return [this._form, this._cardEditor, this._picker].filter(Boolean);
+      return [this._form, this._stackEditor].filter(Boolean);
     }
 
-    /* hui-card-element-editor and hui-card-picker are lazy-loaded by the
-       frontend and are not there until some built-in stack editor has been
-       opened at least once. Opening one on the quiet defines both. */
+    /* The cards are edited by Home Assistant's own stack editor, borrowed
+       whole — the same one behind Vertical stack, with the card search, the
+       previews, "paste from clipboard", the reordering and the GUI/YAML
+       toggle. Rebuilding that by hand means rebuilding it again at every
+       release of HA, and worse for the whole time in between.
+       It is lazy-loaded, so it has to be coaxed into existence first: build a
+       vertical-stack card, wait for its class, ask it for its editor. */
     async _boot() {
       if (this._booted) return;
       this._booted = true;
       try {
-        if (!customElements.get("hui-card-element-editor")) {
+        let cls = customElements.get("hui-vertical-stack-card");
+        if (!cls) {
           const helpers = await window.loadCardHelpers();
           helpers.createCardElement({ type: "vertical-stack", cards: [] });
           await customElements.whenDefined("hui-vertical-stack-card");
-          const cls = customElements.get("hui-vertical-stack-card");
-          if (cls && cls.getConfigElement) await cls.getConfigElement();
-          await customElements.whenDefined("hui-card-element-editor");
+          cls = customElements.get("hui-vertical-stack-card");
         }
+        this._stackEditor = await cls.getConfigElement();
+        this._stackEditor.addEventListener("config-changed", (ev) => {
+          /* Only the events that carry OUR config are ours. The ones from the
+             cards being edited inside have to keep travelling up to the stack
+             editor, which is the thing that knows what to do with them. */
+          const conf = ev.detail && ev.detail.config;
+          if (!conf || conf.type !== `custom:${CARD_TYPE}`) return;
+          ev.stopPropagation();
+          if (this._applying) return;
+          this._emit({ ...this._config, cards: conf.cards || [] });
+        });
       } catch (err) {
-        /* the editor still works, minus the card picker */
-        console.warn("nearby-card: could not preload the card editor", err);
+        console.warn("nearby-card: could not load Home Assistant's stack editor", err);
+      }
+      /* the DOM may already be up, built before the editor finished loading */
+      const slot = this.shadowRoot.querySelector(".cards");
+      if (this._stackEditor && slot && !slot.contains(this._stackEditor)) {
+        slot.replaceChildren(this._stackEditor);
       }
       this._sync();
     }
@@ -914,75 +937,31 @@
         return;
       }
       if (!this._built) this._build();
-      this._syncTabs();
-      this._syncSlot();
+      this._syncCards();
       this._syncForm();
     }
 
     _build() {
       this.shadowRoot.innerHTML = `
-        <div class="tabs"></div>
-        <div class="slot">
-          <div class="toolbar"></div>
-          <div class="holder"></div>
-          <div class="hint">Cards are grouped by the area of their entity. Add
-            <code>nearby_area: &lt;area id&gt;</code> to a card to pin it to another room.</div>
-        </div>
+        <div class="cards"></div>
+        <div class="hint">Cards are grouped by the area of their entity. Add
+          <code>nearby_area: &lt;area id&gt;</code> to a card to pin it to another room.</div>
         <div class="form"></div>
         <style>
-          .tabs { display:flex; flex-wrap:wrap; gap:4px; align-items:center; margin-bottom:8px; }
-          .tabs button { border:none; border-radius:12px; padding:5px 11px; font-size:13px;
-                         cursor:pointer; color:var(--secondary-text-color);
-                         background:var(--secondary-background-color, rgba(127,127,127,.14)); }
-          .tabs button.on { background:var(--primary-color); color:var(--text-primary-color,#fff); }
-          .toolbar { display:flex; gap:4px; margin:2px 0 6px; }
-          .toolbar ha-icon-button { --mdc-icon-button-size:36px; }
-          .slot { margin-bottom:12px; }
-          .hint { font-size:12px; color:var(--secondary-text-color); margin:8px 2px 0; }
+          .hint { font-size:12px; color:var(--secondary-text-color); margin:4px 2px 14px; }
           .hint code { font-size:11.5px; }
+          .missing { font-size:13px; color:var(--error-color, #c62828); margin:8px 2px; }
         </style>`;
 
-      const bar = this.shadowRoot.querySelector(".toolbar");
-      const tool = (icon, title, fn) => {
-        const b = document.createElement("ha-icon-button");
-        b.title = title;
-        b.innerHTML = `<ha-icon icon="${icon}"></ha-icon>`;
-        b.addEventListener("click", fn);
-        bar.appendChild(b);
-      };
-      const move = (delta) => {
-        const cards = [...this._config.cards];
-        const to = this._selected + delta;
-        if (to < 0 || to >= cards.length) return;
-        [cards[this._selected], cards[to]] = [cards[to], cards[this._selected]];
-        this._selected = to;
-        this._emit({ ...this._config, cards });
-      };
-      tool("mdi:arrow-up", "Move up", () => move(-1));
-      tool("mdi:arrow-down", "Move down", () => move(1));
-      tool("mdi:delete", "Remove", () => {
-        const cards = this._config.cards.filter((_, i) => i !== this._selected);
-        this._selected = Math.max(0, this._selected - 1);
-        this._emit({ ...this._config, cards });
-      });
-
-      const holder = this.shadowRoot.querySelector(".holder");
-
-      this._cardEditor = document.createElement("hui-card-element-editor");
-      this._cardEditor.hass = this._hass;
-      this._cardEditor.lovelace = this._lovelace;
-      this._cardEditor.addEventListener("config-changed", (ev) => {
-        ev.stopPropagation();
-        if (this._applying) return;      /* our own value landing, not a user edit */
-        const cards = [...this._config.cards];
-        cards[this._selected] = ev.detail.config;
-        this._emit({ ...this._config, cards });
-      });
-      this._cardEditor.addEventListener("GUImode-changed", (ev) => {
-        ev.stopPropagation();
-        this._guiMode = ev.detail.guiMode;
-      });
-      holder.appendChild(this._cardEditor);
+      if (this._stackEditor) {
+        this.shadowRoot.querySelector(".cards").appendChild(this._stackEditor);
+      } else {
+        const warn = document.createElement("div");
+        warn.className = "missing";
+        warn.textContent = "Home Assistant's card editor could not be loaded. " +
+          "The cards can still be edited in YAML.";
+        this.shadowRoot.querySelector(".cards").appendChild(warn);
+      }
 
       this._form = document.createElement("ha-form");
       this._form.computeLabel = (s) => FORM_LABELS[s.name] || undefined;
@@ -999,58 +978,19 @@
       this._built = true;
     }
 
-    _syncTabs() {
-      const tabs = this.shadowRoot.querySelector(".tabs");
-      const n = this._config.cards.length;
-      const want = `${n}/${this._selected}`;
-      if (tabs.dataset.state === want) return;
-      tabs.dataset.state = want;
-
-      tabs.replaceChildren();
-      const tab = (text, index, title) => {
-        const b = document.createElement("button");
-        b.textContent = text;
-        if (title) b.title = title;
-        b.classList.toggle("on", index === this._selected);
-        b.addEventListener("click", () => { this._selected = index; this._sync(); });
-        tabs.appendChild(b);
-      };
-      for (let i = 0; i < n; i++) tab(String(i + 1), i);
-      tab("+", n, "Add card");
-    }
-
-    /* The card picker draws a live preview of every card type there is. That
-       is a lot of work to do for something behind a "+" nobody has pressed
-       yet, so it is built the first time it is actually asked for. */
-    _ensurePicker() {
-      if (this._picker) return this._picker;
-      this._picker = document.createElement("hui-card-picker");
-      this._picker.hass = this._hass;
-      this._picker.lovelace = this._lovelace;
-      this._picker.addEventListener("config-changed", (ev) => {
-        ev.stopPropagation();
-        if (this._applying) return;
-        const cards = [...this._config.cards, ev.detail.config];
-        this._selected = cards.length - 1;
-        this._emit({ ...this._config, cards });
-      });
-      this.shadowRoot.querySelector(".holder").appendChild(this._picker);
-      return this._picker;
-    }
-
-    _syncSlot() {
-      const adding = this._selected >= this._config.cards.length;
-      this.shadowRoot.querySelector(".toolbar").style.display = adding ? "none" : "";
-      this.shadowRoot.querySelector(".hint").style.display = adding ? "none" : "";
-      this._cardEditor.style.display = adding ? "none" : "";
-      if (adding) this._ensurePicker().style.display = "";
-      else if (this._picker) this._picker.style.display = "none";
-      if (adding) return;
-
-      const value = this._config.cards[this._selected];
-      if (JSON.stringify(this._cardEditor.value) === JSON.stringify(value)) return;
+    /* The stack editor gets only what it understands — the type, so it can
+       tell its own events from its children's, and the cards. Handing it the
+       rest of the config would trip the strict check it runs on what it is
+       given. */
+    _syncCards() {
+      if (!this._stackEditor) return;
+      const forStack = { type: `custom:${CARD_TYPE}`, cards: this._config.cards || [] };
+      if (JSON.stringify(this._stackSent) === JSON.stringify(forStack)) return;
+      this._stackSent = forStack;
       this._applying = true;
-      this._cardEditor.value = value;
+      this._stackEditor.hass = this._hass;
+      this._stackEditor.lovelace = this._lovelace;
+      this._stackEditor.setConfig(forStack);
       this._applying = false;
     }
 

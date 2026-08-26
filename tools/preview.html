@@ -37,6 +37,9 @@
   body { margin:0; padding:14px; background:#fafafa; display:flex; flex-wrap:wrap;
          gap:14px; align-items:flex-start; }
   .case { width:330px; }
+  /* the card has no background of its own now: this frame stands in for the
+     dashboard section it would sit in */
+  .frame { background:rgba(0,0,0,.04); border-radius:12px; padding:8px; }
   h3 { font:600 13px/1.35 system-ui; color:#555; margin:0 0 6px; }
   .expect { font:400 11.5px/1.35 system-ui; color:#888; margin:0 0 6px; }
   .verdict { font:600 12px/1.4 system-ui; margin:6px 0 0; }
@@ -72,6 +75,18 @@
     getCardSize() { return 1; }
     _draw() {
       if (!this._c || !this._h) return;
+      if (this._c.type === "heading") {
+        const big = this._c.heading_style === "title";
+        this.style.cssText = "display:block;padding:6px 2px 2px";
+        this.innerHTML =
+          '<div style="display:flex;align-items:center;gap:6px;font:' +
+          (big ? "600 15px" : "500 13px") + '/1.3 system-ui;color:var(--' +
+          (big ? "primary" : "secondary") + '-text-color)">' +
+          (this._c.icon ? '<span data-icon="' + this._c.icon +
+            '" style="width:16px;height:16px;border-radius:3px;background:currentColor;opacity:.5"></span>' : '') +
+          '<span>' + this._c.heading + '</span></div>';
+        return;
+      }
       const id = this._c.entity || "(no entity)";
       const s = this._h.states[id];
       const name = this._c.name || (s && s.attributes.friendly_name) || id;
@@ -103,20 +118,25 @@
     set schema(v) { this._schema = v; }
     set hass(v) { this._hass = v; }
   });
-  for (const tag of ["hui-card-element-editor", "hui-card-picker"]) {
-    customElements.define(tag, class extends HTMLElement {
-      set value(v) {
-        this._value = v;
-        /* the real element re-announces the config it is given */
-        this.dispatchEvent(new CustomEvent("config-changed", {
-          detail: { config: v }, bubbles: true, composed: true,
-        }));
-      }
-      get value() { return this._value; }
-      set hass(v) { this._hass = v; }
-      set lovelace(v) { this._lovelace = v; }
-    });
-  }
+  /* Home Assistant's stack editor, which this card borrows whole. The stub
+     re-announces whatever it is handed, like the real one, and forwards the
+     events of the cards being edited inside it — the two things the card has
+     to tell apart. */
+  customElements.define("stub-stack-editor", class extends HTMLElement {
+    setConfig(c) {
+      this._c = c;
+      this.dispatchEvent(new CustomEvent("config-changed", {
+        detail: { config: c }, bubbles: true, composed: true,
+      }));
+    }
+    set hass(v) { this._hass = v; }
+    set lovelace(v) { this._lovelace = v; }
+  });
+  customElements.define("hui-vertical-stack-card", class extends HTMLElement {
+    static async getConfigElement() { return document.createElement("stub-stack-editor"); }
+    setConfig() {}
+    set hass(v) {}
+  });
   customElements.define("ha-icon-button", class extends HTMLElement {});
 </script>
 <script src="../nearby-card.js"></script>
@@ -273,11 +293,11 @@
       config: { ...BASE_CONFIG, grouping: "floor" },
       hass: (h) => h,
       check: (card) => {
-        const caps = [...card.shadowRoot.querySelectorAll(".caption")].map((c) => c.textContent);
+        const caps = captions(card);
         if (caps.join() !== "Ground floor,Upstairs") return "headings: " + caps.join(" / ");
-        /* the floor you are on is the highlighted one */
-        return card.shadowRoot.querySelector(".caption").classList.contains("here")
-          ? true : "your floor is not highlighted";
+        /* the group you are in is the one drawn as a title, the others as subtitles */
+        const styles = headings(card).map((el) => el._c.heading_style);
+        return styles.join() === "title,subtitle" ? true : "styles: " + styles.join(" / ");
       },
     },
     {
@@ -290,7 +310,7 @@
         return h;
       },
       check: (card) => {
-        const caps = [...card.shadowRoot.querySelectorAll(".caption")].map((c) => c.textContent);
+        const caps = captions(card);
         return caps.join() === "Upstairs,Ground floor" ? true : "headings: " + caps.join(" / ");
       },
     },
@@ -301,14 +321,14 @@
       config: { ...BASE_CONFIG, group_icons: true },
       hass: (h) => h,
       check: (card) => {
-        const icons = [...card.shadowRoot.querySelectorAll(".caption ha-icon")]
-          .map((i) => i.getAttribute("icon"));
+        const icons = headings(card).map((el) => el._c.icon ?? null);
         /* no area or floor in the fake house sets an icon of its own, so
            these are the fallbacks: an area looks like an area, a floor like
            its storey */
+        /* room, then floor, then "Elsewhere", which is not a place and so
+           carries no icon */
         const want = ["mdi:texture-box", "mdi:home-floor-0", null];
-        return icons[0] === want[0] && icons[1] === want[1] && icons.length === 2
-          ? true : "icons: " + icons.join(" / ");
+        return icons.join("|") === want.join("|") ? true : "icons: " + icons.join(" / ");
       },
     },
     {
@@ -317,7 +337,7 @@
       config: { ...BASE_CONFIG, grouping: "none", header: { position: "hidden" } },
       hass: (h) => h,
       check: (card) =>
-        card.shadowRoot.querySelectorAll(".caption").length === 0 &&
+        headings(card).length === 0 &&
         card.shadowRoot.querySelector(".where").style.display === "none",
     },
   ];
@@ -325,12 +345,13 @@
   /* ---- helpers that read what the card drew ----------------------------- */
   const title = (card) => card.shadowRoot.querySelector(".line1").textContent;
   const note = (card) => card.shadowRoot.querySelector(".line2").textContent;
-  const firstGroup = (card) => {
-    const cap = card.shadowRoot.querySelector(".caption");
-    return cap ? cap.textContent : null;
-  };
+  const headings = (card) =>
+    [...card.shadowRoot.querySelectorAll("hui-card")].filter((el) => el._c && el._c.type === "heading");
+  const captions = (card) => headings(card).map((el) => el._c.heading);
+  const firstGroup = (card) => captions(card)[0] ?? null;
   const groupEntities = (card, i) =>
     [...card.shadowRoot.querySelectorAll(".group")[i].querySelectorAll("hui-card")]
+      .filter((el) => el._c && el._c.type !== "heading")
       .map((el) => el._c.entity);
 
   const results = [];
@@ -352,7 +373,10 @@
 
     const card = document.createElement("nearby-card");
     card.setConfig(c.config);
-    box.appendChild(card);
+    const frame = document.createElement("div");
+    frame.className = "frame";
+    frame.appendChild(card);
+    box.appendChild(frame);
     if (c.manual) card._manual = { area: c.manual, until: Date.now() + 20 * 60000 };
     card.hass = c.hass(baseHass());
     if (c.openChips) card.shadowRoot.querySelector(".pick").click();
@@ -368,7 +392,8 @@
   }
 
   /* ---- the editor, which is where the loops hide ------------------------ */
-  if (!HERO) {
+  const editorCase = async () => {
+   if (!HERO) {
     const box = document.createElement("div");
     box.className = "case";
     box.innerHTML = "<h3>9. Editor does not loop</h3>" +
@@ -385,48 +410,49 @@
     ed.hass = baseHass();
     ed.lovelace = { config: {} };
 
+    /* _boot is async: give the borrowed stack editor a turn to arrive */
+    await new Promise((r) => setTimeout(r, 0));
+    ed._sync();
+
+    if (!ed.shadowRoot.querySelector("stub-stack-editor")) {
+      problems.push("the stack editor was never mounted");
+    }
+
     /* the dashboard hands hass back on every state change in the house */
     const nodesBefore = ed.shadowRoot.querySelectorAll("*").length;
-    const afterFirstBuild = announced;
+    const before = announced;
     for (let i = 0; i < 50; i++) ed.hass = baseHass();
     const nodesAfter = ed.shadowRoot.querySelectorAll("*").length;
+    if (announced !== before) problems.push(`${announced - before} config changes from idle hass updates`);
+    if (nodesAfter !== nodesBefore) problems.push(`DOM went from ${nodesBefore} to ${nodesAfter} nodes`);
 
-    if (announced !== afterFirstBuild) {
-      problems.push(`${announced - afterFirstBuild} config changes from idle hass updates`);
-    }
-    if (nodesAfter !== nodesBefore) {
-      problems.push(`DOM went from ${nodesBefore} to ${nodesAfter} nodes`);
-    }
-
-    /* a real edit: exactly one announcement, and it carries the change */
+    /* a real edit through the stack editor: announced exactly once */
     announced = 0;
-    ed._form.dispatchEvent(new CustomEvent("value-changed", {
-      detail: { value: { ...ed._formData(), grouping: "none" } },
+    const stack = ed.shadowRoot.querySelector("stub-stack-editor");
+    stack.dispatchEvent(new CustomEvent("config-changed", {
+      detail: { config: { type: "custom:nearby-card", cards: [{ type: "tile", entity: "light.study" }] } },
       bubbles: true, composed: true,
     }));
-    if (announced !== 1) problems.push(`one edit announced ${announced} times`);
-    if (!lastConfig || lastConfig.grouping !== "none") problems.push("the edit did not carry through");
+    if (announced !== 1) problems.push(`one card edit announced ${announced} times`);
+    if (!lastConfig || lastConfig.cards.length !== 1) problems.push("the card edit did not carry through");
+    if (lastConfig && !lastConfig.presence) problems.push("the rest of the config was dropped");
+
+    /* an event from a card being edited INSIDE the stack editor is not ours:
+       it has to keep travelling up, or the stack editor never sees it */
+    let passedThrough = 0;
+    const catcher = (e) => { if (e.detail.config.type === "tile") passedThrough++; };
+    box.addEventListener("config-changed", catcher);
+    stack.dispatchEvent(new CustomEvent("config-changed", {
+      detail: { config: { type: "tile", entity: "light.kitchen" } },
+      bubbles: true, composed: true,
+    }));
+    box.removeEventListener("config-changed", catcher);
+    if (passedThrough !== 1) problems.push("events from the nested cards are being swallowed");
 
     /* the dashboard echoes the new config back, as it does */
     announced = 0;
     ed.setConfig(lastConfig);
     if (announced !== 0) problems.push(`the echo bounced back ${announced} times`);
-
-    /* the card picker previews every card type there is: it must not exist
-       until someone presses "+", and it must not be rebuilt after that */
-    if (ed.shadowRoot.querySelector("hui-card-picker")) {
-      problems.push("card picker built before it was asked for");
-    }
-    ed._selected = ed._config.cards.length;
-    ed._sync();
-    const pickers = ed.shadowRoot.querySelectorAll("hui-card-picker").length;
-    const firstPicker = ed.shadowRoot.querySelector("hui-card-picker");
-    for (let i = 0; i < 20; i++) ed.hass = baseHass();
-    ed._sync();
-    if (pickers !== 1) problems.push(`${pickers} card pickers after pressing +`);
-    if (ed.shadowRoot.querySelector("hui-card-picker") !== firstPicker) {
-      problems.push("card picker was rebuilt");
-    }
 
     const v = document.createElement("p");
     v.className = "verdict " + (problems.length ? "ko" : "ok");
@@ -434,16 +460,20 @@
     box.appendChild(v);
     results.push((problems.length ? "FAIL" : "PASS") + "  9. Editor does not loop" +
                  (problems.length ? "  (" + problems.join("; ") + ")" : ""));
-  }
+   }
+  };
 
-  /* Put the verdicts where a headless run can read them without a screenshot:
-     `chrome --headless --dump-dom | grep -A20 RESULTS` */
-  const summary = document.getElementById("results");
-  summary.style.cssText = "width:100%;font:12px/1.5 ui-monospace,monospace;color:#333";
-  if (HERO) summary.style.display = "none";
-  summary.textContent = "RESULTS\n" + results.join("\n") +
-    `\n${results.filter((r) => r.startsWith("PASS")).length}/${results.length} passed`;
-  document.title = `Nearby Card — ${results.filter((r) => r.startsWith("PASS")).length}/${results.length} passed`;
+  editorCase().then(() => {
+
+    /* Put the verdicts where a headless run can read them without a screenshot:
+       `chrome --headless --dump-dom | grep -A20 RESULTS` */
+    const summary = document.getElementById("results");
+    summary.style.cssText = "width:100%;font:12px/1.5 ui-monospace,monospace;color:#333";
+    if (HERO) summary.style.display = "none";
+    summary.textContent = "RESULTS\n" + results.join("\n") +
+      `\n${results.filter((r) => r.startsWith("PASS")).length}/${results.length} passed`;
+    document.title = `Nearby Card — ${results.filter((r) => r.startsWith("PASS")).length}/${results.length} passed`;
+  });
 </script>
 </body>
 </html>

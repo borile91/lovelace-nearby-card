@@ -6,9 +6,11 @@ You give it cards, the way you would give them to `vertical-stack`. It reads the
 
 Anything can go in it — tiles, mushroom cards, custom cards, whole stacks. It does not care what the card is, only which entity it points at.
 
+It draws no background of its own: the cards inside keep theirs, and the result reads as a stack of cards rather than a box with cards in it. Headings are Home Assistant's own heading card, and the cards are edited with Home Assistant's own stack editor, the one behind Vertical stack — card search, previews, paste from clipboard, reordering, GUI and YAML.
+
 ![Nearby Card](docs/preview.png)
 
-<sub>Offline preview from `tools/preview.html`, on a made-up house: the rows inside are stand-ins for whatever cards you nest, so that the grouping is what you look at.</sub>
+<sub>Offline preview from `tools/preview.html`, on a made-up house: the rows inside are stand-ins for whatever cards you nest, and the grey frame stands in for the dashboard section, so that the grouping is what you look at.</sub>
 
 ## Why
 
@@ -153,9 +155,11 @@ cards:
 | `floor` | One group per floor, the one you are on first |
 | `none` | A single flat list, no headings |
 
-`floor` is the one to pick when the house is more vertical than it is wide, or when presence is only good enough to tell the floors apart — which is often the case with a single area sensor and few receivers. Floors come in the order they are stacked (their `level` in Home Assistant), except the one you are on, which jumps to the top and is highlighted. Cards whose area has no floor land in a group of their own, named by the `no_floor` label.
+`floor` is the one to pick when the house is more vertical than it is wide, or when presence is only good enough to tell the floors apart — which is often the case with a single area sensor and few receivers. Floors come in the order they are stacked (their `level` in Home Assistant), except the one you are on, which jumps to the top and is drawn as a title rather than a subtitle. Cards whose area has no floor land in a group of their own, named by the `no_floor` label.
 
 When nothing knows where you are, any grouping other than `none` falls back to `floor`.
+
+Headings are Home Assistant's own **heading card**, not something drawn here to look like one — the group you are in gets the `title` style, the others `subtitle`. So they match the headings already sitting in your dashboard, and they keep matching when Home Assistant changes them.
 
 `group_icons: true` puts the icon beside each heading — the area's own icon, and the floor's. A floor with no icon of its own falls back to its storey number (`mdi:home-floor-0`, `-1`, …), the same way Home Assistant draws it elsewhere; an area with no icon gets `mdi:texture-box`, so it still looks like an area.
 
