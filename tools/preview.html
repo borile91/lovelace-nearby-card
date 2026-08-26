@@ -295,6 +295,23 @@
       },
     },
     {
+      title: "8d. Icons beside the headings",
+      hero: "Icons beside the headings",
+      expect: "Area icon on the room, storey number on the floors",
+      config: { ...BASE_CONFIG, group_icons: true },
+      hass: (h) => h,
+      check: (card) => {
+        const icons = [...card.shadowRoot.querySelectorAll(".caption ha-icon")]
+          .map((i) => i.getAttribute("icon"));
+        /* no area or floor in the fake house sets an icon of its own, so
+           these are the fallbacks: an area looks like an area, a floor like
+           its storey */
+        const want = ["mdi:texture-box", "mdi:home-floor-0", null];
+        return icons[0] === want[0] && icons[1] === want[1] && icons.length === 2
+          ? true : "icons: " + icons.join(" / ");
+      },
+    },
+    {
       title: "8. No grouping, position hidden",
       expect: "One flat list, no headings, no position line",
       config: { ...BASE_CONFIG, grouping: "none", header: { position: "hidden" } },

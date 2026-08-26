@@ -139,6 +139,7 @@ cards:
 | `nearby` | `[]` | Cards lent to another room: `area`, `entities`. |
 | `grouping` | `area_floor_rest` | See below. |
 | `sort` | `config` | `config` keeps your order, `name` sorts alphabetically inside each group. |
+| `group_icons` | `false` | Draw the area or floor icon beside each heading. |
 | `header.position` | `top` | `top`, `bottom`, or `hidden`. |
 | `header.allow_manual` | `true` | Show the crosshair button. |
 | `labels` | – | Override any of the strings the card shows. |
@@ -155,6 +156,10 @@ cards:
 `floor` is the one to pick when the house is more vertical than it is wide, or when presence is only good enough to tell the floors apart — which is often the case with a single area sensor and few receivers. Floors come in the order they are stacked (their `level` in Home Assistant), except the one you are on, which jumps to the top and is highlighted. Cards whose area has no floor land in a group of their own, named by the `no_floor` label.
 
 When nothing knows where you are, any grouping other than `none` falls back to `floor`.
+
+`group_icons: true` puts the icon beside each heading — the area's own icon, and the floor's. A floor with no icon of its own falls back to its storey number (`mdi:home-floor-0`, `-1`, …), the same way Home Assistant draws it elsewhere; an area with no icon gets `mdi:texture-box`, so it still looks like an area.
+
+> A group named **Unassigned** at the bottom means those cards sit in an area that has no floor. Give the area a floor in **Settings → Areas** and it joins the rest.
 
 ### Labels
 

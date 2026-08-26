@@ -41,7 +41,7 @@
 
   const CARD_TYPE = "nearby-card";
   const EDITOR_TAG = "nearby-card-editor";
-  const VERSION = "1.0.0";
+  const VERSION = "1.2.0";
 
   const UNKNOWN = ["unknown", "unavailable", "none", "not_home", ""];
 
@@ -76,8 +76,9 @@
     /* cards that count as "here" on top of the ones whose area matches:
        [{ area: <area_id>, entities: [<entity_id>, ...] }] */
     nearby: [],
-    grouping: "area_floor_rest",   /* area_floor_rest | area_rest | none */
+    grouping: "area_floor_rest",   /* area_floor_rest | area_rest | floor | none */
     sort: "config",                /* config | name */
+    group_icons: false,            /* draw the area/floor icon beside the heading */
     header: {
       position: "top",             /* top | bottom | hidden */
       allow_manual: true,
@@ -156,10 +157,13 @@
 
     .group { margin-top:8px; }
     .group:first-child { margin-top:0; }
-    .caption { font-size:12.5px; font-weight:600; letter-spacing:.04em;
+    .caption { display:flex; align-items:center; gap:5px;
+               font-size:12.5px; font-weight:600; letter-spacing:.04em;
                text-transform:uppercase; color:var(--secondary-text-color);
-               margin:0 2px 4px; overflow:hidden; text-overflow:ellipsis;
-               white-space:nowrap; }
+               margin:0 2px 4px; }
+    .caption span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .caption ha-icon { --mdc-icon-size:16px; width:16px; height:16px; flex:none;
+                       color:inherit; }
     .caption.here { color:var(--primary-color); }
     .stack { display:flex; flex-direction:column; gap:6px; }
 
@@ -304,6 +308,24 @@
       const f = this._hass.floors && this._hass.floors[floorId];
       return f && f.level != null ? f.level : 99;
     }
+    _areaIcon(areaId) {
+      const a = this._hass.areas && this._hass.areas[areaId];
+      /* mdi:texture-box is what Home Assistant shows for an area with no icon
+         of its own, so an area without one still looks like an area */
+      return a ? a.icon || "mdi:texture-box" : null;
+    }
+    /* Same fallback the frontend uses when a floor has no icon: the storey
+       number, or a plain house when there is no level to draw. */
+    _floorIcon(floorId) {
+      const f = this._hass.floors && this._hass.floors[floorId];
+      if (!f) return null;
+      if (f.icon) return f.icon;
+      const level = f.level;
+      if (level == null) return "mdi:home-outline";
+      if (level < 0) return "mdi:home-floor-negative-1";
+      if (level > 3) return "mdi:home-outline";
+      return `mdi:home-floor-${level}`;
+    }
 
     /* ---- where am I -------------------------------------------------- */
     _presence() {
@@ -446,11 +468,14 @@
 
       const out = [];
       if (here.length) {
-        out.push({ key: "here", here: true, title: this._areaName(where.area) || L.here, cards: here });
+        out.push({
+          key: "here", here: true, icon: this._areaIcon(where.area),
+          title: this._areaName(where.area) || L.here, cards: here,
+        });
       }
       if (floor.length) {
         out.push({
-          key: "floor",
+          key: "floor", icon: this._floorIcon(where.floor),
           title: here.length
             ? fill(L.rest_of_floor, { floor: this._floorName(where.floor) })
             : this._floorName(where.floor),
@@ -486,6 +511,7 @@
         .map((k) => ({
           key: `floor_${k}`,
           here: k === here,
+          icon: k === "_" ? null : this._floorIcon(k),
           title: k === "_" ? this._labels.no_floor : this._floorName(k),
           cards: perFloor.get(k),
         }));
@@ -592,7 +618,14 @@
         if (g.title) {
           const cap = document.createElement("div");
           cap.className = "caption" + (g.here ? " here" : "");
-          cap.textContent = g.title;
+          if (this._config.group_icons && g.icon) {
+            const icon = document.createElement("ha-icon");
+            icon.setAttribute("icon", g.icon);
+            cap.appendChild(icon);
+          }
+          const text = document.createElement("span");
+          text.textContent = g.title;
+          cap.appendChild(text);
           div.appendChild(cap);
         }
         const stack = document.createElement("div");
@@ -716,6 +749,7 @@
               { value: "hidden", label: "Hide position" },
             ] } } },
             { name: "header_allow_manual", selector: { boolean: {} } },
+            { name: "group_icons", selector: { boolean: {} } },
           ],
         },
       ],
@@ -735,6 +769,7 @@
     sort: "Default order",
     header_position: "Position indicator",
     header_allow_manual: "Let me set the room by hand",
+    group_icons: "Icon beside each heading",
   };
 
   const FORM_HELPERS = {
@@ -742,6 +777,7 @@
     area_attribute: "Attribute holding the area id. If the sensor puts the area in its state instead, leave the attribute empty.",
     area_sensors: "One sensor per room. When several are on, the most recent one wins.",
     nearby: "A card belongs to the area of its entity. Here you can lend it to another room as well — a window registered in the living room that sits right by the bathroom door.",
+    group_icons: "The area or floor icon from Home Assistant. Floors without one fall back to their storey number.",
   };
 
   class NearbyCardEditor extends HTMLElement {
@@ -831,6 +867,7 @@
         nearby: c.nearby || [],
         grouping: c.grouping ?? DEFAULTS.grouping,
         sort: c.sort ?? DEFAULTS.sort,
+        group_icons: c.group_icons ?? DEFAULTS.group_icons,
         header_position: (c.header && c.header.position) ?? DEFAULTS.header.position,
         header_allow_manual: (c.header && c.header.allow_manual) ?? DEFAULTS.header.allow_manual,
       };
@@ -854,6 +891,7 @@
       else delete out.nearby;
       out.grouping = v.grouping;
       out.sort = v.sort;
+      out.group_icons = v.group_icons;
       out.header = { position: v.header_position, allow_manual: v.header_allow_manual };
       return out;
     }
